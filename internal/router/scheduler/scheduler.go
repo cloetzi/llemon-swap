@@ -102,7 +102,7 @@ func New(conf config.Config, name string, logger *logmon.Monitor, planner Swappe
 	}
 	switch use {
 	case "fifo":
-		return NewFIFO(name, logger, planner, conf.Routing.Scheduler.Settings.Fifo, conf.Models, eff), nil
+		return NewFIFOWithLifecycle(name, logger, planner, conf.Routing.Scheduler.Settings.Fifo, conf.Models, conf.LifecyclePools, eff), nil
 	default:
 		return nil, fmt.Errorf("unsupported scheduler type: %q", use)
 	}
@@ -115,6 +115,7 @@ type HandlerReq struct {
 	Admit      chan error
 	Respond    chan HandlerResp
 	PositionCh chan int
+	QueuedAt   time.Time
 }
 
 // HandlerResp is the routing decision returned to a HandlerReq's caller: either

@@ -123,6 +123,14 @@ type ModelConfig struct {
 	Unlisted      bool     `yaml:"unlisted"`
 	UseModelName  string   `yaml:"useModelName"`
 
+	// Provider-backed models use a long-lived external server instead of
+	// starting one process per model.
+	Provider          string `yaml:"provider"`
+	ProviderModel     string `yaml:"providerModel"`
+	LifecyclePool     string `yaml:"lifecyclePool"`
+	Residency         string `yaml:"residency"`
+	ResidencyPriority int    `yaml:"residencyPriority"`
+
 	// #179 for /v1/models
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`

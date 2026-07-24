@@ -1,15 +1,65 @@
-![llama-swap header image](docs/assets/hero4.webp)
-![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/mostlygeek/llama-swap/total)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/mostlygeek/llama-swap/go-ci.yml)
-![GitHub Repo stars](https://img.shields.io/github/stars/mostlygeek/llama-swap)
+![A lemon surrounded by model nodes and curved routing arrows](docs/assets/llemon-swap-hero.webp)
 
-# llama-swap
+# llemon-swap
 
-Run multiple generative AI models on your machine and hot-swap between them on demand. llama-swap works with any OpenAI and Anthropic API compatible server and is used by thousands of people to power their local AI workflows.
+llemon-swap is a Lemonade-aware model lifecycle proxy and scheduler. It presents one OpenAI- and Anthropic-compatible endpoint, keeps preferred models resident, temporarily makes room for on-demand models, and restores displaced defaults after their work finishes.
 
-Built in Go for performance and simplicity, llama-swap has zero dependencies and is incredibly easy to set up. Get started in minutes - just one binary and one configuration file.
+This project is a fork of [mostlygeek/llama-swap](https://github.com/mostlygeek/llama-swap). It retains llama-swap's process-managed models, routing, queueing, UI, metrics, configuration compatibility, license, and project history while adding lifecycle-managed providers. Existing llama-swap configurations remain valid.
 
-## Features:
+## What llemon-swap adds
+
+- Lemonade Server discovery, health, load, unload, and public pin/unpin integration
+- `hard-pinned`, `preferred`, `transient`, and `external` residency policies
+- Per-provider lifecycle pools without changing llama-swap's existing matrix semantics
+- Resident-first scheduling with deterministic FIFO ordering and bounded fairness
+- Coalesced cold loads, active-stream eviction protection, displaced-default restoration, and drift reconciliation
+- Provider state in the Web UI, `GET /api/providers`, `GET /ready`, structured logs, and Prometheus metrics
+
+## Lemonade quick start
+
+Start Lemonade Server separately, then use a lifecycle pool. In this example, `main-chat` and `fast-chat` fill both slots. Work for `occasional-coder` temporarily displaces the lower-priority default; the default is restored and repinned after 30 seconds without transient work.
+
+```yaml
+providers:
+  lemonade-local:
+    type: lemonade
+    baseURL: http://127.0.0.1:13305
+    # apiKeyEnv: LEMONADE_API_KEY
+    # adminApiKeyEnv: LEMONADE_ADMIN_API_KEY
+
+lifecyclePools:
+  primary:
+    provider: lemonade-local
+    capacity: 2
+    restorePreferred: true
+    transientIdleTTL: 30s
+    residentFirst: true
+    maxResidentBurst: 8
+    maxResidentWait: 10s
+
+models:
+  main-chat:
+    provider: lemonade-local
+    providerModel: Qwen3.5-35B-GGUF
+    lifecyclePool: primary
+    residency: preferred
+    residencyPriority: 0
+  fast-chat:
+    provider: lemonade-local
+    providerModel: Qwen3-4B-GGUF
+    lifecyclePool: primary
+    residency: preferred
+    residencyPriority: 1
+  occasional-coder:
+    provider: lemonade-local
+    providerModel: Qwen3-Coder-GGUF
+    lifecyclePool: primary
+    residency: transient
+```
+
+See the [Lemonade lifecycle guide](docs/lemonade.md), [configuration reference](docs/configuration.md), and [complete example](docs/examples/lemonade/config.yaml).
+
+## Inherited llama-swap features
 
 - ✅ Easy to deploy and configure: one binary, one configuration file. no external dependencies
 - ✅ On-demand model switching
@@ -38,7 +88,7 @@ Built in Go for performance and simplicity, llama-swap has zero dependencies and
   - `/sdapi/v1/txt2img`
   - `/sdapi/v1/img2img`
   - `/sdapi/v1/loras` - requires `model` in request body to fetch the correct loras
-- ✅ llama-swap API
+- ✅ llemon-swap API
   - `/ui` - web UI
   - `/upstream/:model_id` - direct access to upstream server ([demo](https://github.com/mostlygeek/llama-swap/pull/31))
   - `/running` - list currently running models ([#61](https://github.com/mostlygeek/llama-swap/issues/61))
@@ -55,6 +105,8 @@ Built in Go for performance and simplicity, llama-swap has zero dependencies and
     - `GET /logs/stream/upstream` streams upstream process logs only.
     - `GET /logs/stream/{model_id}` streams logs for one model (including IDs with slashes, like `author/model`).
   - `/health` - just returns "OK"
+  - `/ready` - required-provider and preferred-model readiness
+  - `/api/providers` - provider health, residency, transitions, active work, and restoration state
   - `/metrics` - system and GPU metrics for prometheus
 - ✅ API Key support - define keys to restrict access to API endpoints
 - ✅ Customizable
@@ -67,7 +119,7 @@ Built in Go for performance and simplicity, llama-swap has zero dependencies and
 
 ### Web UI
 
-llama-swap includes a real time web interface with a playground for testing out all sorts of local models:
+llemon-swap includes the upstream real-time web interface and adds provider and residency state to the model dashboard:
 
 <img width="1094" height="667" alt="image" src="https://github.com/user-attachments/assets/a79b3cea-5ee1-45f1-8db9-5f5331690e64" />
 
@@ -89,7 +141,18 @@ Real time log streaming:
 
 ## Installation
 
-llama-swap can be installed in multiple ways
+The llemon-swap lifecycle changes are currently built from this fork's source:
+
+```shell
+git clone https://github.com/cloetzi/llemon-swap.git
+cd llemon-swap
+make clean all
+# binaries are written to build/llemon-swap-*
+```
+
+The package-manager and container instructions below describe inherited upstream llama-swap distributions. Those artifacts do not include llemon-swap provider lifecycle support unless they are built from this fork.
+
+llama-swap can be installed in multiple ways:
 
 1. Docker
 2. Homebrew (macOS and Linux)
@@ -229,11 +292,11 @@ Almost all configuration settings are optional and can be added one step at a ti
 
 See the [configuration documentation](docs/configuration.md) for all options.
 
-## How does llama-swap work?
+## How does llemon-swap work?
 
-When a request is made to an OpenAI compatible endpoint, llama-swap will extract the `model` value and load the appropriate server configuration to serve it. If the wrong upstream server is running, it will be replaced with the correct one. This is where the "swap" part comes in. The upstream server is automatically swapped to handle the request correctly.
+For process-managed models, llemon-swap preserves llama-swap behavior: it extracts `model`, starts the configured server if needed, and swaps incompatible processes.
 
-In the most basic configuration llama-swap handles one model at a time. For more advanced use cases, using a `matrix` allows multiple models to be loaded at the same time. You have complete control over how your system resources are used.
+For Lemonade-backed models, the Lemonade process remains running. llemon-swap reconciles observed residency, drains an evictable model, calls Lemonade's public lifecycle API, proxies inference without buffering, and accounts for the request until the response or stream really ends. A separate `lifecyclePool` expresses provider capacity; the existing `matrix` continues to express valid process concurrency combinations.
 
 ## Reverse Proxy Configuration (nginx)
 

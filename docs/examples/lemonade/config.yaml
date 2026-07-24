@@ -1,0 +1,42 @@
+# A persistent Lemonade Server must already be listening on port 13305.
+providers:
+  lemonade-local:
+    type: lemonade
+    baseURL: http://127.0.0.1:13305
+    # Names of environment variables; secret values never enter this file.
+    # apiKeyEnv: LEMONADE_API_KEY
+    # adminApiKeyEnv: LEMONADE_ADMIN_API_KEY
+    managementTimeout: 3m
+    coldStartTimeout: 10m
+    discoveryInterval: 5s
+
+lifecyclePools:
+  primary:
+    provider: lemonade-local
+    capacity: 2
+    restorePreferred: true
+    transientIdleTTL: 30s
+    residentFirst: true
+    maxResidentBurst: 8
+    maxResidentWait: 10s
+
+models:
+  main-chat:
+    provider: lemonade-local
+    providerModel: Qwen3.5-35B-GGUF
+    lifecyclePool: primary
+    residency: preferred
+    residencyPriority: 0
+
+  fast-chat:
+    provider: lemonade-local
+    providerModel: Qwen3-4B-GGUF
+    lifecyclePool: primary
+    residency: preferred
+    residencyPriority: 1
+
+  occasional-coder:
+    provider: lemonade-local
+    providerModel: Qwen3-Coder-GGUF
+    lifecyclePool: primary
+    residency: transient

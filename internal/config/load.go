@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -80,6 +81,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		}
 	}
 
+	if err := validateProviders(&config); err != nil {
+		return Config{}, err
+	}
+
 	// Apply default for upstream.ignorePaths when not specified. The default
 	// matches common static-asset suffixes so they do not trigger a swap.
 	if len(config.Upstream.IgnorePaths) == 0 {
@@ -121,6 +126,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 	for _, modelId := range modelIds {
 		modelConfig := config.Models[modelId]
 		modelConfig.HealthCheckTimeout = config.HealthCheckTimeout
+
+		if err := normalizeProviderModel(&config, modelId, &modelConfig); err != nil {
+			return Config{}, err
+		}
 
 		// Strip comments from command fields
 		modelConfig.Cmd = StripComments(modelConfig.Cmd)
@@ -316,6 +325,9 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 
 		config.Models[modelId] = modelConfig
 	}
+	if err := validateLifecycleResidency(config); err != nil {
+		return Config{}, err
+	}
 
 	// Normalize routing config. The legacy top-level `matrix`/`groups` keys and
 	// the new `routing.router` block are mutually exclusive: a config may use
@@ -414,6 +426,7 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		}
 		config.Hooks.OnStartup.Preload = toPreload
 	}
+	config.Hooks.OnStartup.Preload = appendPreferredPreloads(config, config.Hooks.OnStartup.Preload)
 
 	// Validate API keys (env macros already substituted at string level)
 	for i, apikey := range config.RequiredAPIKeys {
@@ -471,6 +484,162 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 	}
 
 	return config, nil
+}
+
+func validateProviders(config *Config) error {
+	providerPools := make(map[string]string)
+	for id, provider := range config.Providers {
+		if strings.TrimSpace(id) == "" {
+			return fmt.Errorf("providers: provider names cannot be empty")
+		}
+		if provider.Type != ProviderTypeLemonade {
+			return fmt.Errorf("providers.%s.type: unsupported provider type %q", id, provider.Type)
+		}
+		u, err := url.Parse(provider.BaseURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("providers.%s.baseURL: must be an absolute HTTP(S) URL", id)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("providers.%s.baseURL: unsupported URL scheme %q", id, u.Scheme)
+		}
+		if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("providers.%s.baseURL: credentials, query strings, and fragments are not allowed", id)
+		}
+		if provider.ManagementTimeout <= 0 || provider.ColdStartTimeout <= 0 || provider.DiscoveryInterval <= 0 {
+			return fmt.Errorf("providers.%s: managementTimeout, coldStartTimeout, and discoveryInterval must be positive", id)
+		}
+		if provider.APIKeyEnv != "" {
+			provider.ResolvedAPIKey = os.Getenv(provider.APIKeyEnv)
+			if provider.ResolvedAPIKey == "" {
+				return fmt.Errorf("providers.%s.apiKeyEnv: environment variable %q is not set", id, provider.APIKeyEnv)
+			}
+		}
+		if provider.AdminAPIKeyEnv != "" {
+			provider.ResolvedAdminAPIKey = os.Getenv(provider.AdminAPIKeyEnv)
+			if provider.ResolvedAdminAPIKey == "" {
+				return fmt.Errorf("providers.%s.adminApiKeyEnv: environment variable %q is not set", id, provider.AdminAPIKeyEnv)
+			}
+		}
+		provider.BaseURL = strings.TrimRight(provider.BaseURL, "/")
+		config.Providers[id] = provider
+	}
+
+	for id, pool := range config.LifecyclePools {
+		if strings.TrimSpace(id) == "" {
+			return fmt.Errorf("lifecyclePools: pool names cannot be empty")
+		}
+		if _, ok := config.Providers[pool.Provider]; !ok {
+			return fmt.Errorf("lifecyclePools.%s.provider references unknown provider %q", id, pool.Provider)
+		}
+		if existing, found := providerPools[pool.Provider]; found {
+			return fmt.Errorf(
+				"lifecyclePools.%s and lifecyclePools.%s use provider %q; one lifecycle pool per provider is currently supported",
+				existing, id, pool.Provider,
+			)
+		}
+		providerPools[pool.Provider] = id
+		if pool.Capacity < 1 {
+			return fmt.Errorf("lifecyclePools.%s.capacity must be at least 1", id)
+		}
+		if pool.TransientIdleTTL < 0 || pool.MaxResidentWait < 0 || pool.MaxResidentBurst < 0 {
+			return fmt.Errorf("lifecyclePools.%s: transientIdleTTL, maxResidentWait, and maxResidentBurst cannot be negative", id)
+		}
+		if pool.ResidentFirst && pool.MaxResidentWait == 0 && pool.MaxResidentBurst == 0 {
+			return fmt.Errorf("lifecyclePools.%s: residentFirst requires maxResidentWait or maxResidentBurst to prevent starvation", id)
+		}
+	}
+	return nil
+}
+
+func validateLifecycleResidency(config Config) error {
+	desired := make(map[string]int)
+	for _, model := range config.Models {
+		if model.Provider != "" && (model.Residency == ResidencyHardPinned || model.Residency == ResidencyPreferred) {
+			desired[model.LifecyclePool]++
+		}
+	}
+	for poolName, count := range desired {
+		if capacity := config.LifecyclePools[poolName].Capacity; count > capacity {
+			return fmt.Errorf(
+				"lifecyclePools.%s.capacity=%d cannot hold %d hard-pinned/preferred models; increase capacity or mark lower-priority models transient",
+				poolName, capacity, count,
+			)
+		}
+	}
+	return nil
+}
+
+func normalizeProviderModel(config *Config, id string, model *ModelConfig) error {
+	if model.Provider == "" {
+		if model.ProviderModel != "" || model.LifecyclePool != "" || model.Residency != "" {
+			return fmt.Errorf("model %s: providerModel, lifecyclePool, and residency require provider", id)
+		}
+		return nil
+	}
+	provider, ok := config.Providers[model.Provider]
+	if !ok {
+		return fmt.Errorf("model %s: provider references unknown provider %q", id, model.Provider)
+	}
+	if model.ProviderModel == "" {
+		return fmt.Errorf("model %s: providerModel is required for provider-backed models", id)
+	}
+	pool, ok := config.LifecyclePools[model.LifecyclePool]
+	if !ok {
+		return fmt.Errorf("model %s: lifecyclePool references unknown pool %q", id, model.LifecyclePool)
+	}
+	if pool.Provider != model.Provider {
+		return fmt.Errorf("model %s: lifecyclePool %q belongs to provider %q, not %q", id, model.LifecyclePool, pool.Provider, model.Provider)
+	}
+	switch model.Residency {
+	case ResidencyHardPinned, ResidencyPreferred, ResidencyTransient, ResidencyExternal:
+	case "":
+		model.Residency = ResidencyTransient
+	default:
+		return fmt.Errorf("model %s: unsupported residency %q", id, model.Residency)
+	}
+	if model.Cmd != "" || model.CmdStop != "" {
+		return fmt.Errorf("model %s: provider-backed models cannot define cmd or cmdStop", id)
+	}
+	model.Proxy = provider.BaseURL
+	model.CheckEndpoint = "/api/v1/health"
+	model.UseModelName = model.ProviderModel
+
+	for otherID, other := range config.Models {
+		if otherID == id {
+			continue
+		}
+		if other.Provider == model.Provider && other.ProviderModel == model.ProviderModel {
+			return fmt.Errorf("models %s and %s map to the same provider model %q; use aliases instead", otherID, id, model.ProviderModel)
+		}
+	}
+	return nil
+}
+
+func appendPreferredPreloads(config Config, current []string) []string {
+	seen := make(map[string]bool, len(current))
+	for _, id := range current {
+		seen[id] = true
+	}
+	var preferred []string
+	for id, model := range config.Models {
+		if model.Provider != "" && (model.Residency == ResidencyHardPinned || model.Residency == ResidencyPreferred) {
+			preferred = append(preferred, id)
+		}
+	}
+	sort.Slice(preferred, func(i, j int) bool {
+		mi, mj := config.Models[preferred[i]], config.Models[preferred[j]]
+		if mi.ResidencyPriority != mj.ResidencyPriority {
+			return mi.ResidencyPriority < mj.ResidencyPriority
+		}
+		return preferred[i] < preferred[j]
+	})
+	for _, id := range preferred {
+		if !seen[id] {
+			current = append(current, id)
+			seen[id] = true
+		}
+	}
+	return current
 }
 
 func validateProfiles(config Config) error {

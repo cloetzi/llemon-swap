@@ -1,8 +1,8 @@
 {
     "$schema": "https://json-schema.org/draft-07/schema#",
-    "$id": "llama-swap-config-schema.json",
-    "title": "llama-swap configuration",
-    "description": "Configuration file for llama-swap",
+    "$id": "llemon-swap-config-schema.json",
+    "title": "llemon-swap configuration",
+    "description": "Configuration file for llemon-swap, a Lemonade-aware fork of llama-swap",
     "type": "object",
     "required": [
         "models"
@@ -233,7 +233,7 @@
                 "path"
             ],
             "additionalProperties": false,
-            "description": "Store configuration for durable llama-swap state."
+            "description": "Store configuration for durable llemon-swap state."
         },
         "ui": {
             "type": "object",
@@ -413,14 +413,89 @@
                 "additionalProperties": false
             }
         },
+        "providers": {
+            "type": "object",
+            "default": {},
+            "description": "Long-lived externally managed inference providers.",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["baseURL"],
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["lemonade"]
+                    },
+                    "baseURL": {
+                        "type": "string",
+                        "format": "uri"
+                    },
+                    "apiKeyEnv": {
+                        "type": "string",
+                        "description": "Environment variable containing the inference API key."
+                    },
+                    "adminApiKeyEnv": {
+                        "type": "string",
+                        "description": "Environment variable containing the provider management API key."
+                    },
+                    "managementTimeout": {
+                        "type": "string",
+                        "pattern": "^[-+]?(\\d+(\\.\\d+)?(ns|us|ms|s|m|h))+$",
+                        "default": "3m"
+                    },
+                    "coldStartTimeout": {
+                        "type": "string",
+                        "pattern": "^[-+]?(\\d+(\\.\\d+)?(ns|us|ms|s|m|h))+$",
+                        "default": "10m"
+                    },
+                    "discoveryInterval": {
+                        "type": "string",
+                        "pattern": "^[-+]?(\\d+(\\.\\d+)?(ns|us|ms|s|m|h))+$",
+                        "default": "5s"
+                    },
+                    "insecureSkipVerify": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "required": {
+                        "type": "boolean",
+                        "default": true
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "lifecyclePools": {
+            "type": "object",
+            "default": {},
+            "description": "Capacity and scheduling policy for provider-backed models. This is separate from the process-model matrix DSL.",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["provider"],
+                "properties": {
+                    "provider": {"type": "string", "minLength": 1},
+                    "capacity": {"type": "integer", "minimum": 1, "default": 1},
+                    "restorePreferred": {"type": "boolean", "default": true},
+                    "transientIdleTTL": {
+                        "type": "string",
+                        "pattern": "^[-+]?(\\d+(\\.\\d+)?(ns|us|ms|s|m|h))+$",
+                        "default": "0s"
+                    },
+                    "residentFirst": {"type": "boolean", "default": true},
+                    "maxResidentBurst": {"type": "integer", "minimum": 0, "default": 8},
+                    "maxResidentWait": {
+                        "type": "string",
+                        "pattern": "^[-+]?(\\d+(\\.\\d+)?(ns|us|ms|s|m|h))+$",
+                        "default": "10s"
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
         "models": {
             "type": "object",
             "description": "A dictionary of model configurations. Each key is a model's ID. Model settings have defaults if not defined. The model's ID is available as ${MODEL_ID}.",
             "additionalProperties": {
                 "type": "object",
-                "required": [
-                    "cmd"
-                ],
                 "properties": {
                     "macros": {
                         "$ref": "#/definitions/macros"
@@ -460,7 +535,7 @@
                         "type": "string",
                         "default": "http://localhost:${PORT}",
                         "format": "uri",
-                        "description": "URL where llama-swap routes API requests. If custom port is used in cmd, this must be set."
+                        "description": "URL where llemon-swap routes API requests. If custom port is used in cmd, this must be set."
                     },
                     "aliases": {
                         "type": "array",
@@ -493,6 +568,28 @@
                         "type": "string",
                         "default": "",
                         "description": "Override the model name sent to upstream server. Useful if upstream expects a different name."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider ID for an externally managed model. Omit for process-managed models."
+                    },
+                    "providerModel": {
+                        "type": "string",
+                        "description": "Model identifier expected by the provider."
+                    },
+                    "lifecyclePool": {
+                        "type": "string",
+                        "description": "Provider lifecycle pool controlling capacity, fairness, and restoration."
+                    },
+                    "residency": {
+                        "type": "string",
+                        "enum": ["hard-pinned", "preferred", "transient", "external"],
+                        "default": "transient"
+                    },
+                    "residencyPriority": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Lower values restore first; higher values are evicted first."
                     },
                     "filters": {
                         "type": "object",
@@ -640,7 +737,7 @@
                 "none"
             ],
             "default": "proxy",
-            "description": "Controls what is logged to stdout. 'proxy': logs generated by llama-swap, 'upstream': copy of upstream process stdout logs, 'both': both interleaved together, 'none': no logs written to stdout."
+            "description": "Controls what is logged to stdout. 'proxy': logs generated by llemon-swap, 'upstream': copy of upstream process stdout logs, 'both': both interleaved together, 'none': no logs written to stdout."
         },
         "apiKeys": {
             "type": "array",
@@ -663,7 +760,7 @@
                     "proxy": {
                         "type": "string",
                         "format": "uri",
-                        "description": "A valid base URL to proxy requests to. Requested path to llama-swap will be appended to the end of the proxy value."
+                        "description": "A valid base URL to proxy requests to. The requested path to llemon-swap is appended to the proxy value."
                     },
                     "apiKey": {
                         "type": "string",
@@ -738,7 +835,7 @@
                 }
             },
             "default": {},
-            "description": "A dictionary of remote peers and models they provide. Peers can be another llama-swap or any server that provides the /v1/ generative API endpoints supported by llama-swap."
+            "description": "A dictionary of remote peers and models they provide. Peers can be another llemon-swap/llama-swap instance or any server that provides the supported /v1/ generative API endpoints."
         },
         "upstream": {
             "type": "object",

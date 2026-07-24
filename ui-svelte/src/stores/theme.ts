@@ -55,7 +55,7 @@ function getInitialThemeMode(): ThemeMode {
 // Persistent stores
 export const themeMode = persistentStore<ThemeMode>("theme-mode", getInitialThemeMode());
 export const themeName = persistentStore<ThemeName>("theme-name", "default");
-export const appTitle = persistentStore<string>("app-title", "llama-swap");
+export const appTitle = persistentStore<string>("app-title", "llemon-swap");
 
 const prefersDarkQuery = "(prefers-color-scheme: dark)";
 
