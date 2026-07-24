@@ -1,7 +1,7 @@
 # add this modeline for validation in vscode
-# yaml-language-server: $schema=https://raw.githubusercontent.com/mostlygeek/llama-swap/refs/heads/main/config-schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cloetzi/llemon-swap/refs/heads/main/config-schema.json
 #
-# llama-swap YAML configuration example
+# llemon-swap YAML configuration example
 # -------------------------------------
 #
 # 💡 Tip - Use an LLM with this file!
@@ -226,6 +226,38 @@ selectors:
       # requests reserved per active target before spilling over to the next target
       # - optional, default: 1
       spillover: 4
+
+# Persistent Lemonade providers are optional. Lemonade Server is started and
+# configured separately; llemon-swap manages model residency through its public
+# HTTP APIs. See docs/examples/lemonade/config.yaml for a complete example.
+#
+# providers:
+#   lemonade-local:
+#     type: lemonade
+#     baseURL: http://127.0.0.1:13305
+#     apiKeyEnv: LEMONADE_API_KEY
+#     adminApiKeyEnv: LEMONADE_ADMIN_API_KEY
+#     managementTimeout: 3m
+#     coldStartTimeout: 10m
+#     discoveryInterval: 5s
+#     required: true
+#
+# lifecyclePools:
+#   primary:
+#     provider: lemonade-local
+#     capacity: 2
+#     restorePreferred: true
+#     transientIdleTTL: 30s
+#     residentFirst: true
+#     maxResidentBurst: 8
+#     maxResidentWait: 10s
+#
+# A provider-backed entry inside models uses these fields instead of cmd:
+#   provider: lemonade-local
+#   providerModel: Qwen3-4B-GGUF
+#   lifecyclePool: primary
+#   residency: preferred
+#   residencyPriority: 0
 
 # models: a dictionary of model configurations
 # - required

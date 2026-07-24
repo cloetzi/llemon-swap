@@ -7,6 +7,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/process"
+	"github.com/mostlygeek/llama-swap/internal/provider"
 )
 
 type Matrix struct {
@@ -14,6 +15,10 @@ type Matrix struct {
 }
 
 func NewMatrix(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Matrix, error) {
+	return NewMatrixWithProviders(conf, proxylog, upstreamlog, nil)
+}
+
+func NewMatrixWithProviders(conf config.Config, proxylog, upstreamlog *logmon.Monitor, registry *provider.Registry) (*Matrix, error) {
 	mtx := conf.Routing.Router.Settings.Matrix
 	if mtx == nil {
 		return nil, fmt.Errorf("matrix router requires a matrix configuration")
@@ -24,10 +29,11 @@ func NewMatrix(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Matr
 		}
 	}
 
-	swapper := &matrixSwapper{
+	baseSwapper := &matrixSwapper{
 		solver: newMatrixSolver(mtx.Program(), mtx.ResolvedEvictCosts()),
 		logger: proxylog,
 	}
+	swapper := wrapLifecycleSwapper(conf, registry, baseSwapper, proxylog)
 
 	// Build a process for every model in the config. Any model can run alone
 	// even if it is not part of a set; this mirrors proxy.NewMatrix.
@@ -39,7 +45,7 @@ func NewMatrix(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Matr
 
 	for mid, modelCfg := range conf.Models {
 		procLog := logmon.NewWriter(upstreamlog)
-		p, err := process.New(base.procCtx, mid, modelCfg, procLog, proxylog)
+		p, err := newConfiguredProcess(base, mid, modelCfg, registry, procLog, proxylog)
 		if err != nil {
 			base.shutdownFn()
 			base.procCancel()

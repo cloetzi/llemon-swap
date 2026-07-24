@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { link } from "svelte-spa-router";
   import { activeProfile, models, profiles, unloadAllModels } from "../stores/api";
+  import type { ProviderStatus } from "../lib/types";
   import { statusDotColor } from "../stores/modelLoad";
   import { showUnlistedModels as showUnlisted } from "../stores/modelDisplay";
   import type { Model } from "../lib/types";
@@ -13,6 +15,23 @@
   import { PowerOff, Loader2, ExternalLink, SquareStack, Eye } from "@lucide/svelte";
 
   let unloadingAll = $state(false);
+  let providers = $state<ProviderStatus[]>([]);
+
+  async function refreshProviders(): Promise<void> {
+    try {
+      const response = await fetch("/api/providers");
+      if (!response.ok) return;
+      providers = (await response.json() as { providers: ProviderStatus[] }).providers ?? [];
+    } catch {
+      // The connection indicator already reports API availability.
+    }
+  }
+
+  onMount(() => {
+    void refreshProviders();
+    const interval = window.setInterval(refreshProviders, 5000);
+    return () => window.clearInterval(interval);
+  });
 
   let visibleModels = $derived(
     $showUnlisted ? $models : $models.filter((m) => !m.unlisted)
@@ -64,6 +83,16 @@
     <span class="text-muted-foreground text-xs uppercase tracking-wide">
       {model.state}
     </span>
+    {#if model.provider}
+      <Tag class="px-1.5 text-[0.625rem] uppercase">
+        {model.provider}
+      </Tag>
+    {/if}
+    {#if model.residency}
+      <Tag class="px-1.5 text-[0.625rem] uppercase">
+        {model.residency}
+      </Tag>
+    {/if}
     {#if model.unlisted}
       <Tag class="px-1.5 text-[0.625rem] uppercase">unlisted</Tag>
     {/if}
@@ -108,6 +137,42 @@
 {/snippet}
 
 <div class="flex h-full flex-col gap-4 overflow-y-auto p-2">
+  {#if providers.length > 0}
+    <Card.Root class="shrink-0 gap-0 overflow-hidden py-0">
+      <Card.Header class="border-b px-4 py-2">
+        <Card.Title class="text-sm">Lifecycle providers</Card.Title>
+      </Card.Header>
+      <Card.Content class="divide-y p-0">
+        {#each providers as provider (provider.name)}
+          <div class="flex items-center gap-2 px-4 py-2 text-xs">
+            <span
+              class={`size-2 rounded-full ${provider.healthy ? "bg-green-500" : "bg-red-500"}`}
+              title={provider.healthy ? "healthy" : "unhealthy"}
+            ></span>
+            <span class="font-medium">{provider.name}</span>
+            <Tag class="uppercase">{provider.type}</Tag>
+            {#if provider.version}
+              <span class="text-muted-foreground">v{provider.version}</span>
+            {/if}
+            <span class="text-muted-foreground ml-auto">
+              {provider.residentModels?.length ?? 0} resident ·
+              {provider.desiredModels?.length ?? 0} desired ·
+              {Object.values(provider.active ?? {}).reduce((sum, count) => sum + count, 0)} active
+            </span>
+            {#each Object.entries(provider.transitions ?? {}) as [model, transition]}
+              <Tag class="uppercase">{model}: {transition}</Tag>
+            {/each}
+            {#if provider.lastError}
+              <span class="max-w-72 truncate text-red-500" title={provider.lastError}>
+                {provider.lastError}
+              </span>
+            {/if}
+          </div>
+        {/each}
+      </Card.Content>
+    </Card.Root>
+  {/if}
+
   <Card.Root class="shrink-0 gap-0 overflow-hidden py-0">
     <Card.Header class="shrink-0 gap-2 border-b px-4 py-3">
       <div class="flex items-center gap-2">

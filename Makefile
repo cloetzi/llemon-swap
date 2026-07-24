@@ -1,5 +1,5 @@
 # Define variables for the application
-APP_NAME = llama-swap
+APP_NAME = llemon-swap
 BUILD_DIR = build
 
 # Prefer repository-local development tools when they have been bootstrapped.
