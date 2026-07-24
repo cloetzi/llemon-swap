@@ -19,14 +19,18 @@ import (
 
 // apiModel is one entry in the /api/events modelStatus payload.
 type apiModel struct {
-	Id           string         `json:"id"`
-	Name         string         `json:"name"`
-	Description  string         `json:"description"`
-	State        string         `json:"state"`
-	Unlisted     bool           `json:"unlisted"`
-	PeerID       string         `json:"peerID"`
-	Aliases      []string       `json:"aliases,omitempty"`
-	Capabilities map[string]any `json:"capabilities,omitempty"`
+	Id            string         `json:"id"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	State         string         `json:"state"`
+	Unlisted      bool           `json:"unlisted"`
+	PeerID        string         `json:"peerID"`
+	Aliases       []string       `json:"aliases,omitempty"`
+	Capabilities  map[string]any `json:"capabilities,omitempty"`
+	Provider      string         `json:"provider,omitempty"`
+	ProviderModel string         `json:"providerModel,omitempty"`
+	LifecyclePool string         `json:"lifecyclePool,omitempty"`
+	Residency     string         `json:"residency,omitempty"`
 }
 
 type apiProfile struct {
@@ -113,13 +117,17 @@ func (s *Server) modelStatus() []apiModel {
 		}
 		_, capsMap, _, _ := renderCapabilities(mc.Capabilities)
 		models = append(models, apiModel{
-			Id:           id,
-			Name:         mc.Name,
-			Description:  mc.Description,
-			State:        state,
-			Unlisted:     mc.Unlisted,
-			Aliases:      mc.Aliases,
-			Capabilities: capsMap,
+			Id:            id,
+			Name:          mc.Name,
+			Description:   mc.Description,
+			State:         state,
+			Unlisted:      mc.Unlisted,
+			Aliases:       mc.Aliases,
+			Capabilities:  capsMap,
+			Provider:      mc.Provider,
+			ProviderModel: mc.ProviderModel,
+			LifecyclePool: mc.LifecyclePool,
+			Residency:     mc.Residency,
 		})
 	}
 

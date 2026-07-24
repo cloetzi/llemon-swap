@@ -1,6 +1,36 @@
 # config.yaml
 
-llama-swap is designed to be very simple: one binary, one configuration file.
+llemon-swap is designed to be very simple: one binary, one configuration file. It remains compatible with process-managed llama-swap configurations and also supports persistent Lemonade providers.
+
+For the complete provider, lifecycle-pool, residency, fairness, restoration, readiness, security, and troubleshooting reference, see [Lemonade lifecycle providers](lemonade.md). A runnable configuration is available at [docs/examples/lemonade/config.yaml](examples/lemonade/config.yaml).
+
+## Lemonade provider summary
+
+```yaml
+providers:
+  local:
+    type: lemonade
+    baseURL: http://127.0.0.1:13305
+
+lifecyclePools:
+  primary:
+    provider: local
+    capacity: 2
+    restorePreferred: true
+    transientIdleTTL: 30s
+    residentFirst: true
+    maxResidentBurst: 8
+    maxResidentWait: 10s
+
+models:
+  chat:
+    provider: local
+    providerModel: Qwen3-4B-GGUF
+    lifecyclePool: primary
+    residency: preferred
+```
+
+`lifecyclePools` is separate from `matrix`: the former models capacity on a persistent provider, while the latter retains its upstream meaning of valid concurrent process combinations.
 
 ## minimal viable config
 

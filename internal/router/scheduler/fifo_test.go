@@ -524,6 +524,105 @@ func TestFIFO_NoSwapWhileServing(t *testing.T) {
 	}
 }
 
+func lifecycleFIFO(eff *fakeEffects, planner Swapper, burst int, wait time.Duration) *FIFO {
+	models := map[string]config.ModelConfig{
+		"resident": {LifecyclePool: "primary"},
+		"cold":     {LifecyclePool: "primary"},
+	}
+	pools := map[string]config.LifecyclePoolConfig{
+		"primary": {
+			ResidentFirst:    true,
+			MaxResidentBurst: burst,
+			MaxResidentWait:  wait,
+		},
+	}
+	return NewFIFOWithLifecycle("test", logmon.NewWriter(io.Discard), planner, config.FifoConfig{}, models, pools, eff)
+}
+
+func TestFIFO_ResidentFirstBurstPromotesColdRequest(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["resident"] = process.StateReady
+	eff.states["cold"] = process.StateStopped
+	planner := &stubPlanner{evict: map[string][]string{"cold": {"resident"}}}
+	s := lifecycleFIFO(eff, planner, 1, time.Hour)
+
+	s.OnRequest(req("resident"))
+	s.OnRequest(req("cold")) // blocked by resident's active request
+	s.OnRequest(req("resident"))
+	if got := eff.served("resident"); got != 2 {
+		t.Fatalf("resident grants = %d, want 2 before burst limit", got)
+	}
+	s.OnRequest(req("resident")) // must queue behind the promoted cold work
+	if got := eff.served("resident"); got != 2 {
+		t.Fatalf("resident grants = %d, want bounded preference", got)
+	}
+
+	s.OnServeDone(ServeDoneEvent{ModelID: "resident"})
+	s.OnServeDone(ServeDoneEvent{ModelID: "resident"})
+	if got := eff.startsFor("cold"); got != 1 {
+		t.Fatalf("cold swap starts = %d, want 1", got)
+	}
+}
+
+func TestFIFO_ResidentFirstWaitPromotesColdRequest(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["resident"] = process.StateReady
+	eff.states["cold"] = process.StateStopped
+	planner := &stubPlanner{evict: map[string][]string{"cold": {"resident"}}}
+	s := lifecycleFIFO(eff, planner, 100, 10*time.Second)
+	now := time.Unix(100, 0)
+	s.now = func() time.Time { return now }
+
+	s.OnRequest(req("resident"))
+	s.OnRequest(req("cold"))
+	now = now.Add(11 * time.Second)
+	s.OnRequest(req("resident"))
+	if got := eff.served("resident"); got != 1 {
+		t.Fatalf("resident grants = %d, want old cold request to stop new admissions", got)
+	}
+
+	s.OnServeDone(ServeDoneEvent{ModelID: "resident"})
+	if got := eff.startsFor("cold"); got != 1 {
+		t.Fatalf("cold swap starts = %d, want 1", got)
+	}
+}
+
+func TestFIFO_ResidentFirstPreservesCrossPoolOrder(t *testing.T) {
+	eff := newFakeEffects()
+	models := map[string]config.ModelConfig{
+		"one-cold":     {LifecyclePool: "one"},
+		"one-resident": {LifecyclePool: "one"},
+		"two-cold":     {LifecyclePool: "two"},
+		"two-resident": {LifecyclePool: "two"},
+	}
+	for _, id := range []string{"one-resident", "two-resident"} {
+		eff.states[id] = process.StateReady
+	}
+	for _, id := range []string{"one-cold", "two-cold"} {
+		eff.states[id] = process.StateStopped
+	}
+	pools := map[string]config.LifecyclePoolConfig{
+		"one": {ResidentFirst: true, MaxResidentBurst: 8, MaxResidentWait: time.Hour},
+		"two": {ResidentFirst: true, MaxResidentBurst: 8, MaxResidentWait: time.Hour},
+	}
+	s := NewFIFOWithLifecycle("test", logmon.NewWriter(io.Discard), &stubPlanner{}, config.FifoConfig{}, models, pools, eff)
+	s.now = func() time.Time { return time.Unix(10, 0) }
+	pending := []HandlerReq{
+		{Model: "one-cold", QueuedAt: time.Unix(1, 0)},
+		{Model: "two-cold", QueuedAt: time.Unix(2, 0)},
+		{Model: "one-resident", QueuedAt: time.Unix(3, 0)},
+		{Model: "two-resident", QueuedAt: time.Unix(4, 0)},
+	}
+	s.queued = pending
+	got := s.fairOrder(pending)
+	want := []string{"one-resident", "two-resident", "one-cold", "two-cold"}
+	for i, model := range want {
+		if got[i].Model != model {
+			t.Fatalf("fair order[%d] = %s, want %s; full order=%v", i, got[i].Model, model, got)
+		}
+	}
+}
+
 // TestFIFO_GrantServeFalseDoesNotLeakInFlight verifies that when a caller has
 // walked away (GrantServe returns false) the in-flight count is not bumped, so a
 // later evicting request is not blocked forever.
