@@ -306,10 +306,10 @@ func main() {
 	go func() {
 		var startErr error
 		if useTLS {
-			proxyLog.Infof("llama-swap listening with TLS on https://%s", listenAddr)
+			proxyLog.Infof("llemon-swap listening with TLS on https://%s", listenAddr)
 			startErr = httpServer.ListenAndServeTLS(*flagCertFile, *flagKeyFile)
 		} else {
-			proxyLog.Infof("llama-swap listening on http://%s", listenAddr)
+			proxyLog.Infof("llemon-swap listening on http://%s", listenAddr)
 			startErr = httpServer.ListenAndServe()
 		}
 		if startErr != nil && !errors.Is(startErr, http.ErrServerClosed) {
@@ -320,7 +320,7 @@ func main() {
 
 	if !shared.IsLoopbackAddr(listenAddr) {
 		_, port, _ := net.SplitHostPort(listenAddr)
-		proxyLog.Infof("llama-swap is reachable by all hosts on the network, use -listen localhost:%s to restrict to loopback only", port)
+		proxyLog.Infof("llemon-swap is reachable by all hosts on the network, use -listen localhost:%s to restrict to loopback only", port)
 	}
 
 	exitChan := make(chan struct{})

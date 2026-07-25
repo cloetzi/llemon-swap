@@ -12,6 +12,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/process"
+	"github.com/mostlygeek/llama-swap/internal/provider"
 	"github.com/mostlygeek/llama-swap/internal/router/scheduler"
 	"github.com/mostlygeek/llama-swap/internal/shared"
 )
@@ -178,6 +179,9 @@ func (b *baseRouter) ModelState(modelID string) (process.ProcessState, bool) {
 
 // StartSwap implements scheduler.Effects, launching the swap goroutine.
 func (b *baseRouter) StartSwap(modelID string, evict []string) {
+	if aware, ok := b.processes[modelID].(process.SwapAware); ok {
+		aware.BeginSwap(evict)
+	}
 	go b.doSwap(modelID, evict)
 }
 
@@ -195,7 +199,48 @@ func (b *baseRouter) GrantError(req scheduler.HandlerReq, err error) {
 // the router would never again be willing to evict this model.
 func (b *baseRouter) GrantServe(req scheduler.HandlerReq, modelID string) bool {
 	p := b.processes[modelID]
+	if lease, ok := p.(process.LeaseAware); ok {
+		if !lease.AcquireLease() {
+			b.grant(req, scheduler.HandlerResp{Err: provider.Error{
+				Code:    "model_transitioning",
+				Message: "provider model is changing residency",
+				Status:  http.StatusServiceUnavailable,
+			}})
+			return false
+		}
+		if !b.grant(req, scheduler.HandlerResp{HandleFunc: b.trackedServe(modelID, p)}) {
+			lease.ReleaseLease()
+			return false
+		}
+		return true
+	}
 	return b.grant(req, scheduler.HandlerResp{HandleFunc: b.trackedServe(modelID, p)})
+}
+
+// QueueDelta is an optional scheduler callback used by lifecycle-backed
+// processes. Process-managed models intentionally ignore it.
+func (b *baseRouter) QueueDelta(modelID string, delta int) {
+	if queued, ok := b.processes[modelID].(process.QueueAware); ok {
+		queued.QueueDelta(delta)
+	}
+}
+
+func (b *baseRouter) QueueWait(modelID string, wait time.Duration) {
+	if queued, ok := b.processes[modelID].(process.QueueAware); ok {
+		queued.QueueWait(wait)
+	}
+}
+
+func (b *baseRouter) ResidentAdmission(modelID string) {
+	if queued, ok := b.processes[modelID].(process.QueueAware); ok {
+		queued.ResidentAdmission()
+	}
+}
+
+func (b *baseRouter) FairnessPromotion(modelID string) {
+	if queued, ok := b.processes[modelID].(process.QueueAware); ok {
+		queued.FairnessPromotion()
+	}
 }
 
 // StopProcesses implements scheduler.Effects, stopping the named processes in
@@ -231,6 +276,9 @@ func (b *baseRouter) StopProcesses(timeout time.Duration, ids []string) {
 func (b *baseRouter) trackedServe(modelID string, p process.Process) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
+			if lease, ok := p.(process.LeaseAware); ok {
+				lease.ReleaseLease()
+			}
 			select {
 			case b.serveDoneCh <- scheduler.ServeDoneEvent{ModelID: modelID}:
 			case <-b.shutdownCtx.Done():
@@ -296,7 +344,13 @@ func (b *baseRouter) handleShutdown(req shutdownReq) {
 		wg.Add(1)
 		go func(id string, p process.Process) {
 			defer wg.Done()
-			if err := p.Stop(stopTimeout); err != nil {
+			var err error
+			if aware, ok := p.(process.ShutdownAware); ok {
+				err = aware.Shutdown(stopTimeout)
+			} else {
+				err = p.Stop(stopTimeout)
+			}
+			if err != nil {
 				b.logger.Warnf("%s failed to stop process %s: %v", b.name, id, err)
 			}
 		}(i, p)

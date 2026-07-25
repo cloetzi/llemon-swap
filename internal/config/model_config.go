@@ -123,6 +123,14 @@ type ModelConfig struct {
 	Unlisted      bool     `yaml:"unlisted"`
 	UseModelName  string   `yaml:"useModelName"`
 
+	// Provider-backed models use a long-lived external server instead of
+	// starting one process per model.
+	Provider          string `yaml:"provider"`
+	ProviderModel     string `yaml:"providerModel"`
+	LifecyclePool     string `yaml:"lifecyclePool"`
+	Residency         string `yaml:"residency"`
+	ResidencyPriority int    `yaml:"residencyPriority"`
+
 	// #179 for /v1/models
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
@@ -156,6 +164,13 @@ type ModelConfig struct {
 
 func (m *ModelConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	type rawModelConfig ModelConfig
+	var explicit struct {
+		CmdStop *string `yaml:"cmdStop"`
+	}
+	if err := unmarshal(&explicit); err != nil {
+		return err
+	}
+
 	defaults := rawModelConfig{
 		Cmd:              "",
 		CmdStop:          "",
@@ -189,6 +204,9 @@ func (m *ModelConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	if err := unmarshal(&defaults); err != nil {
 		return err
+	}
+	if defaults.Provider != "" && explicit.CmdStop == nil {
+		defaults.CmdStop = ""
 	}
 
 	*m = ModelConfig(defaults)

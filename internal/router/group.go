@@ -6,6 +6,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/process"
+	"github.com/mostlygeek/llama-swap/internal/provider"
 )
 
 type Group struct {
@@ -13,6 +14,10 @@ type Group struct {
 }
 
 func NewGroup(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Group, error) {
+	return NewGroupWithProviders(conf, proxylog, upstreamlog, nil)
+}
+
+func NewGroupWithProviders(conf config.Config, proxylog, upstreamlog *logmon.Monitor, registry *provider.Registry) (*Group, error) {
 	modelToGroup := make(map[string]string)
 	for gid, gcfg := range conf.Routing.Router.Settings.Groups {
 		for _, mid := range gcfg.Members {
@@ -23,10 +28,11 @@ func NewGroup(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Group
 		}
 	}
 
-	swapper := &groupSwapper{
+	baseSwapper := &groupSwapper{
 		config:       conf,
 		modelToGroup: modelToGroup,
 	}
+	swapper := wrapLifecycleSwapper(conf, registry, baseSwapper, proxylog)
 
 	processes := make(map[string]process.Process, len(modelToGroup))
 	base, err := newBaseRouter("group", conf, processes, proxylog, swapper)
@@ -42,7 +48,7 @@ func NewGroup(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Group
 			return nil, fmt.Errorf("no model config for %q", mid)
 		}
 		procLog := logmon.NewWriter(upstreamlog)
-		p, err := process.New(base.procCtx, mid, modelCfg, procLog, proxylog)
+		p, err := newConfiguredProcess(base, mid, modelCfg, registry, procLog, proxylog)
 		if err != nil {
 			base.shutdownFn()
 			base.procCancel()

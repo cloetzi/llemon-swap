@@ -44,12 +44,29 @@ type FIFO struct {
 	reserved map[string]int
 	inFlight map[string]int
 	queued   []HandlerReq
+
+	models         map[string]config.ModelConfig
+	pools          map[string]config.LifecyclePoolConfig
+	residentBursts map[string]int
+	now            func() time.Time
 }
 
 // NewFIFO builds a FIFO scheduler. Per-model concurrency limits are derived
 // from models: each model's ConcurrencyLimit overrides defaultConcurrencyLimit
 // when set to a value greater than zero.
 func NewFIFO(name string, logger *logmon.Monitor, planner Swapper, cfg config.FifoConfig, models map[string]config.ModelConfig, eff Effects) *FIFO {
+	return NewFIFOWithLifecycle(name, logger, planner, cfg, models, nil, eff)
+}
+
+func NewFIFOWithLifecycle(
+	name string,
+	logger *logmon.Monitor,
+	planner Swapper,
+	cfg config.FifoConfig,
+	models map[string]config.ModelConfig,
+	pools map[string]config.LifecyclePoolConfig,
+	eff Effects,
+) *FIFO {
 	limits := make(map[string]int, len(models))
 	for id, mc := range models {
 		limit := defaultConcurrencyLimit
@@ -60,15 +77,19 @@ func NewFIFO(name string, logger *logmon.Monitor, planner Swapper, cfg config.Fi
 	}
 
 	return &FIFO{
-		name:     name,
-		logger:   logger,
-		planner:  planner,
-		cfg:      cfg,
-		effects:  eff,
-		limits:   limits,
-		active:   make(map[string]*activeSwap),
-		reserved: make(map[string]int),
-		inFlight: make(map[string]int),
+		name:           name,
+		logger:         logger,
+		planner:        planner,
+		cfg:            cfg,
+		effects:        eff,
+		limits:         limits,
+		active:         make(map[string]*activeSwap),
+		reserved:       make(map[string]int),
+		inFlight:       make(map[string]int),
+		models:         models,
+		pools:          pools,
+		residentBursts: make(map[string]int),
+		now:            time.Now,
 	}
 }
 
@@ -116,7 +137,13 @@ func (s *FIFO) OnRequest(req HandlerReq) {
 
 	// (3) Fast path: ready, nothing to evict, and nobody is evicting us.
 	if state == process.StateReady && len(evict) == 0 && !collidesWith(req.Model, evict, s.active) {
+		if s.shouldYieldToCold(req.Model) {
+			s.logger.Debugf("%s: queuing resident request for model %s to promote older cold work", s.name, req.Model)
+			s.enqueue(req)
+			return
+		}
 		s.logger.Debugf("%s: fast-path serving model %s (already ready)", s.name, req.Model)
+		s.recordResidentAdmission(req.Model)
 		s.grantHandler(req, req.Model)
 		return
 	}
@@ -154,6 +181,7 @@ func (s *FIFO) OnCancel(req HandlerReq) {
 		for _, q := range s.queued {
 			if q.Respond == req.Respond {
 				removed = true
+				s.queueDone(q)
 				s.release(q.Model)
 				continue
 			}
@@ -247,6 +275,7 @@ func (s *FIFO) OnUnload(targets []string, timeout time.Duration) {
 		kept := s.queued[:0]
 		for _, w := range s.queued {
 			if targetSet[w.Model] {
+				s.queueDone(w)
 				s.grantError(w, unloadErr)
 				continue
 			}
@@ -274,6 +303,7 @@ func (s *FIFO) OnShutdown(err error) {
 		}
 	}
 	for _, w := range s.queued {
+		s.queueDone(w)
 		s.grantError(w, err)
 	}
 }
@@ -375,6 +405,9 @@ func (s *FIFO) startSwap(initial HandlerReq, evict, running []string) {
 		waiters: []HandlerReq{initial},
 	}
 	s.planner.OnSwapStart(initial.Model, running)
+	if pool := s.poolFor(initial.Model); pool != "" {
+		s.residentBursts[pool] = 0
+	}
 	s.effects.StartSwap(initial.Model, evict)
 }
 
@@ -383,6 +416,9 @@ func (s *FIFO) startSwap(initial HandlerReq, evict, running []string) {
 // are serviced first while equal-priority requests keep their arrival (FIFO)
 // order. Priorities come from the FifoConfig; unlisted models default to 0.
 func (s *FIFO) enqueue(req HandlerReq) {
+	if req.QueuedAt.IsZero() {
+		req.QueuedAt = s.now()
+	}
 	p := s.cfg.Priority[req.Model]
 	i := len(s.queued)
 	for j, q := range s.queued {
@@ -394,6 +430,7 @@ func (s *FIFO) enqueue(req HandlerReq) {
 	s.queued = append(s.queued, HandlerReq{})
 	copy(s.queued[i+1:], s.queued[i:])
 	s.queued[i] = req
+	s.queueDelta(req.Model, 1)
 	broadcastQueuePositions(s.queued)
 }
 
@@ -405,16 +442,18 @@ func (s *FIFO) drainQueue() {
 	if len(s.queued) == 0 {
 		return
 	}
-	pending := s.queued
+	pending := s.fairOrder(s.queued)
 	var remaining []HandlerReq
 	for _, req := range pending {
 		state, ok := s.effects.ModelState(req.Model)
 		if !ok {
+			s.queueDone(req)
 			s.grantError(req, ErrModelNotFound)
 			continue
 		}
 		if sw, ok := s.active[req.Model]; ok {
 			s.logger.Debugf("%s: queued request for model %s now joining in-flight swap", s.name, req.Model)
+			s.queueDone(req)
 			sw.waiters = append(sw.waiters, req)
 			continue
 		}
@@ -422,6 +461,8 @@ func (s *FIFO) drainQueue() {
 		evict := s.planner.EvictionFor(req.Model, running)
 		if state == process.StateReady && len(evict) == 0 && !collidesWith(req.Model, evict, s.active) {
 			s.logger.Debugf("%s: queued request for model %s now served fast-path", s.name, req.Model)
+			s.queueDone(req)
+			s.recordResidentAdmission(req.Model)
 			s.grantHandler(req, req.Model)
 			continue
 		}
@@ -434,10 +475,153 @@ func (s *FIFO) drainQueue() {
 			continue
 		}
 		s.logger.Debugf("%s: queued request for model %s now starting swap, evicting %v", s.name, req.Model, evict)
+		s.queueDone(req)
 		s.startSwap(req, evict, running)
 	}
 	s.queued = remaining
 	broadcastQueuePositions(s.queued)
+}
+
+func (s *FIFO) queueDelta(modelID string, delta int) {
+	if observer, ok := s.effects.(interface {
+		QueueDelta(string, int)
+	}); ok {
+		observer.QueueDelta(modelID, delta)
+	}
+}
+
+func (s *FIFO) queueDone(req HandlerReq) {
+	s.queueDelta(req.Model, -1)
+	if req.QueuedAt.IsZero() {
+		return
+	}
+	if observer, ok := s.effects.(interface {
+		QueueWait(string, time.Duration)
+	}); ok {
+		observer.QueueWait(req.Model, s.now().Sub(req.QueuedAt))
+	}
+}
+
+func (s *FIFO) poolFor(modelID string) string {
+	if model, ok := s.models[modelID]; ok {
+		return model.LifecyclePool
+	}
+	return ""
+}
+
+func (s *FIFO) shouldYieldToCold(modelID string) bool {
+	poolName := s.poolFor(modelID)
+	policy, ok := s.pools[poolName]
+	if !ok || !policy.ResidentFirst {
+		return false
+	}
+	oldest, found := s.oldestCold(poolName)
+	if !found {
+		return false
+	}
+	if policy.MaxResidentBurst > 0 && s.residentBursts[poolName] >= policy.MaxResidentBurst {
+		s.logger.Infof("%s: fairness promotion pool=%s model=%s reason=resident_burst", s.name, poolName, oldest.Model)
+		return true
+	}
+	if policy.MaxResidentWait > 0 && s.now().Sub(oldest.QueuedAt) >= policy.MaxResidentWait {
+		s.logger.Infof("%s: fairness promotion pool=%s model=%s reason=max_wait", s.name, poolName, oldest.Model)
+		return true
+	}
+	return false
+}
+
+func (s *FIFO) recordResidentAdmission(modelID string) {
+	poolName := s.poolFor(modelID)
+	if poolName == "" {
+		return
+	}
+	if _, found := s.oldestCold(poolName); found {
+		s.residentBursts[poolName]++
+		if observer, ok := s.effects.(interface{ ResidentAdmission(string) }); ok {
+			observer.ResidentAdmission(modelID)
+		}
+	}
+}
+
+func (s *FIFO) recordFairnessPromotion(modelID string) {
+	if observer, ok := s.effects.(interface{ FairnessPromotion(string) }); ok {
+		observer.FairnessPromotion(modelID)
+	}
+}
+
+func (s *FIFO) oldestCold(poolName string) (HandlerReq, bool) {
+	var oldest HandlerReq
+	found := false
+	for _, req := range s.queued {
+		if s.poolFor(req.Model) != poolName || !s.isCold(req.Model) {
+			continue
+		}
+		if !found || req.QueuedAt.Before(oldest.QueuedAt) {
+			oldest = req
+			found = true
+		}
+	}
+	return oldest, found
+}
+
+func (s *FIFO) isCold(modelID string) bool {
+	state, ok := s.effects.ModelState(modelID)
+	if !ok || state != process.StateReady {
+		return true
+	}
+	return len(s.planner.EvictionFor(modelID, s.runningSet(modelID))) > 0
+}
+
+// fairOrder preserves FIFO within resident and cold classes. Resident work is
+// considered first until either fairness bound is reached, then the oldest
+// cold request is deterministically promoted.
+func (s *FIFO) fairOrder(pending []HandlerReq) []HandlerReq {
+	if len(pending) < 2 {
+		return pending
+	}
+	out := append([]HandlerReq(nil), pending...)
+	poolNames := make([]string, 0, len(s.pools))
+	for poolName := range s.pools {
+		poolNames = append(poolNames, poolName)
+	}
+	sort.Strings(poolNames)
+	for _, poolName := range poolNames {
+		policy := s.pools[poolName]
+		if !policy.ResidentFirst {
+			continue
+		}
+		oldest, found := s.oldestCold(poolName)
+		if !found {
+			continue
+		}
+		promote := (policy.MaxResidentBurst > 0 && s.residentBursts[poolName] >= policy.MaxResidentBurst) ||
+			(policy.MaxResidentWait > 0 && s.now().Sub(oldest.QueuedAt) >= policy.MaxResidentWait)
+		var resident, cold []HandlerReq
+		var indexes []int
+		for index, req := range out {
+			if s.poolFor(req.Model) != poolName {
+				continue
+			}
+			indexes = append(indexes, index)
+			if s.isCold(req.Model) {
+				cold = append(cold, req)
+			} else {
+				resident = append(resident, req)
+			}
+		}
+		var ordered []HandlerReq
+		if promote && len(cold) > 0 {
+			s.recordFairnessPromotion(cold[0].Model)
+			ordered = append([]HandlerReq{cold[0]}, resident...)
+			ordered = append(ordered, cold[1:]...)
+		} else {
+			ordered = append(resident, cold...)
+		}
+		for i, index := range indexes {
+			out[index] = ordered[i]
+		}
+	}
+	return out
 }
 
 // runningSet is the live model set handed to the Swapper: every process the

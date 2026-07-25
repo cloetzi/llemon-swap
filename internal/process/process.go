@@ -47,3 +47,31 @@ type Process interface {
 	// Logger returns the monitor that captures this process's stdout/stderr.
 	Logger() *logmon.Monitor
 }
+
+// SwapAware is implemented by provider-backed processes that need to record
+// why preferred models are being displaced before the destructive transition.
+type SwapAware interface {
+	BeginSwap(victims []string)
+}
+
+// ShutdownAware lets a long-lived external provider remain running when the
+// proxy exits. Manual unload and scheduler eviction still call Stop.
+type ShutdownAware interface {
+	Shutdown(time.Duration) error
+}
+
+// LeaseAware lets provider-backed processes reserve lifecycle residency at the
+// scheduler grant boundary, before the HTTP handler goroutine can race an idle
+// restoration timer.
+type LeaseAware interface {
+	AcquireLease() bool
+	ReleaseLease()
+}
+
+// QueueAware exposes scheduler queue counts for provider observability.
+type QueueAware interface {
+	QueueDelta(int)
+	QueueWait(time.Duration)
+	ResidentAdmission()
+	FairnessPromotion()
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/event"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/perf"
+	"github.com/mostlygeek/llama-swap/internal/provider"
 	"github.com/mostlygeek/llama-swap/internal/router"
 	"github.com/mostlygeek/llama-swap/internal/shared"
 	"github.com/mostlygeek/llama-swap/internal/store"
@@ -39,8 +40,9 @@ type Server struct {
 	profileMu     sync.RWMutex
 	activeProfile string
 
-	local router.LocalRouter
-	peer  router.Router
+	local     router.LocalRouter
+	peer      router.Router
+	providers *provider.Registry
 
 	mux     *http.ServeMux
 	handler http.Handler
@@ -154,32 +156,42 @@ type BuildInfo struct {
 }
 
 func New(cfg config.Config, muxlog *logmon.Monitor, proxylog *logmon.Monitor, upstreamlog *logmon.Monitor, perfMon *perf.Monitor, st *store.Store, build BuildInfo) (*Server, error) {
+	if st == nil {
+		return nil, fmt.Errorf("store is required")
+	}
+
+	shutdownCtx, shutdownFn := context.WithCancel(context.Background())
+	providers, err := provider.NewRegistry(shutdownCtx, cfg, proxylog)
+	if err != nil {
+		shutdownFn()
+		return nil, fmt.Errorf("creating provider registry: %w", err)
+	}
 	var local router.LocalRouter
-	var err error
 
 	switch cfg.Routing.Router.Use {
 	case "matrix":
-		local, err = router.NewMatrix(cfg, proxylog, upstreamlog)
+		local, err = router.NewMatrixWithProviders(cfg, proxylog, upstreamlog, providers)
 		if err != nil {
+			providers.Close()
+			shutdownFn()
 			return nil, fmt.Errorf("creating matrix router: %w", err)
 		}
 	default: // "group"
-		local, err = router.NewGroup(cfg, proxylog, upstreamlog)
+		local, err = router.NewGroupWithProviders(cfg, proxylog, upstreamlog, providers)
 		if err != nil {
+			providers.Close()
+			shutdownFn()
 			return nil, fmt.Errorf("creating group router: %w", err)
 		}
 	}
 
 	peer, err := router.NewPeer(cfg, proxylog)
 	if err != nil {
+		_ = local.Shutdown(0)
+		providers.Close()
+		shutdownFn()
 		return nil, fmt.Errorf("creating peer router: %w", err)
 	}
-
-	if st == nil {
-		return nil, fmt.Errorf("store is required")
-	}
-
-	shutdownCtx, shutdownFn := context.WithCancel(context.Background())
 	s := &Server{
 		cfg:         cfg,
 		muxlog:      muxlog,
@@ -192,6 +204,7 @@ func New(cfg config.Config, muxlog *logmon.Monitor, proxylog *logmon.Monitor, up
 		build:       build,
 		local:       local,
 		peer:        peer,
+		providers:   providers,
 		shutdownCtx: shutdownCtx,
 		shutdownFn:  shutdownFn,
 	}
@@ -269,6 +282,7 @@ func (s *Server) routes() {
 	mux.Handle("GET /logs/stream/{logMonitorID...}", apiChain.ThenFunc(s.handleLogStream))
 
 	mux.HandleFunc("GET /health", handleHealth)
+	mux.HandleFunc("GET /ready", s.handleReady)
 	mux.HandleFunc("GET /wol-health", handleHealth)
 	mux.HandleFunc("GET /{$}", handleRootRedirect)
 
@@ -304,6 +318,7 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/metrics/stats", apiChain.ThenFunc(s.handleAPIActivityStats))
 	mux.Handle("GET /api/performance", apiChain.ThenFunc(s.handleAPIPerformance))
 	mux.Handle("GET /api/version", apiChain.ThenFunc(s.handleAPIVersion))
+	mux.Handle("GET /api/providers", apiChain.ThenFunc(s.handleAPIProviders))
 	mux.Handle("GET /api/captures/{id}", apiChain.ThenFunc(s.handleAPICapture))
 
 	s.mux = mux
@@ -354,5 +369,8 @@ func (s *Server) Shutdown(timeout time.Duration) error {
 	}
 
 	wg.Wait()
+	if s.providers != nil {
+		s.providers.Close()
+	}
 	return errors.Join(errs...)
 }

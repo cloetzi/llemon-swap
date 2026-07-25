@@ -11,6 +11,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/event"
 	"github.com/mostlygeek/llama-swap/internal/process"
+	"github.com/mostlygeek/llama-swap/internal/provider"
 	"github.com/mostlygeek/llama-swap/internal/shared"
 )
 
@@ -140,8 +141,15 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	modelIDs := make(map[string]struct{})
 
 	modelStatus := func(id string) string {
-		if _, ok := running[id]; ok {
-			return "loaded"
+		if state, ok := running[id]; ok {
+			switch state {
+			case process.StateStarting:
+				return "loading"
+			case process.StateStopping:
+				return "unloading"
+			default:
+				return "loaded"
+			}
 		}
 		return "unloaded"
 	}
@@ -157,7 +165,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			ID:          id,
 			Object:      "model",
 			Created:     created,
-			OwnedBy:     "llama-swap",
+			OwnedBy:     "llemon-swap",
 			Name:        strings.TrimSpace(name),
 			Description: strings.TrimSpace(description),
 			Status:      map[string]any{"value": status},
@@ -190,6 +198,12 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 		status := modelStatus(id)
 		internalMetadata := map[string]any{"type": "model"}
+		if mc.Provider != "" {
+			internalMetadata["provider"] = mc.Provider
+			internalMetadata["providerModel"] = mc.ProviderModel
+			internalMetadata["lifecyclePool"] = mc.LifecyclePool
+			internalMetadata["residency"] = mc.Residency
+		}
 		if len(mc.Aliases) > 0 {
 			internalMetadata["aliases"] = mc.Aliases
 		}
@@ -387,17 +401,98 @@ func (s *Server) startPreload() {
 // handleMetrics serves Prometheus-format performance metrics. Returns 503 when
 // performance monitoring is disabled.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if s.perf == nil {
+	var statuses []provider.Status
+	if s.providers != nil {
+		statuses = s.providers.Status()
+	}
+	if s.perf == nil && len(statuses) == 0 {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("# performance monitor not available\n"))
 		return
 	}
-	s.perf.MetricsHandler().ServeHTTP(w, r)
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	if s.perf != nil {
+		s.perf.MetricsHandler().ServeHTTP(w, r)
+	}
+	for _, status := range statuses {
+		healthy := 0
+		if status.Healthy {
+			healthy = 1
+		}
+		fmt.Fprintf(w, "llemon_provider_healthy{provider=%q} %d\n", status.Name, healthy)
+		fmt.Fprintf(w, "llemon_provider_resident_models{provider=%q} %d\n", status.Name, len(status.ResidentModels))
+		fmt.Fprintf(w, "llemon_provider_desired_models{provider=%q} %d\n", status.Name, len(status.DesiredModels))
+		fmt.Fprintf(w, "llemon_provider_reconcile_corrections_total{provider=%q} %d\n", status.Name, status.ReconcileCorrections)
+		fmt.Fprintf(w, "llemon_provider_coalesced_loads_total{provider=%q} %d\n", status.Name, status.CoalescedLoads)
+		fmt.Fprintf(w, "llemon_provider_failed_transitions_total{provider=%q} %d\n", status.Name, status.FailedTransitions)
+		fmt.Fprintf(w, "llemon_provider_resident_first_admissions_total{provider=%q} %d\n", status.Name, status.ResidentAdmissions)
+		fmt.Fprintf(w, "llemon_provider_fairness_promotions_total{provider=%q} %d\n", status.Name, status.FairnessPromotions)
+		for model, active := range status.Active {
+			fmt.Fprintf(w, "llemon_model_active_requests{provider=%q,model=%q} %d\n", status.Name, model, active)
+		}
+		for model, queued := range status.Queued {
+			fmt.Fprintf(w, "llemon_model_queued_requests{provider=%q,model=%q} %d\n", status.Name, model, queued)
+		}
+		for model, seconds := range status.QueueWaitSeconds {
+			fmt.Fprintf(w, "llemon_model_queue_wait_seconds{provider=%q,model=%q} %g\n", status.Name, model, seconds)
+		}
+		for model, seconds := range status.LoadDurationSeconds {
+			fmt.Fprintf(w, "llemon_model_load_duration_seconds{provider=%q,model=%q} %g\n", status.Name, model, seconds)
+		}
+		for model, seconds := range status.UnloadDurationSeconds {
+			fmt.Fprintf(w, "llemon_model_unload_duration_seconds{provider=%q,model=%q} %g\n", status.Name, model, seconds)
+		}
+		for model, seconds := range status.RestoreDurationSeconds {
+			fmt.Fprintf(w, "llemon_model_restoration_duration_seconds{provider=%q,model=%q} %g\n", status.Name, model, seconds)
+		}
+	}
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
+	var statuses []provider.Status
+	if s.providers != nil {
+		statuses = s.providers.Status()
+	}
+	ready := true
+	for _, status := range statuses {
+		if providerCfg := s.cfg.Providers[status.Name]; providerCfg.Required && !status.Healthy {
+			ready = false
+			break
+		}
+	}
+	running := s.local.RunningModels()
+	if ready {
+		for alias, model := range s.cfg.Models {
+			if model.Provider == "" ||
+				(model.Residency != config.ResidencyHardPinned && model.Residency != config.ResidencyPreferred) ||
+				!s.cfg.Providers[model.Provider].Required {
+				continue
+			}
+			if state, found := running[alias]; !found || state != process.StateReady {
+				ready = false
+				break
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if !ready {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	json.NewEncoder(w).Encode(map[string]any{"ready": ready, "providers": statuses})
+}
+
+func (s *Server) handleAPIProviders(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var statuses []provider.Status
+	if s.providers != nil {
+		statuses = s.providers.Status()
+	}
+	json.NewEncoder(w).Encode(map[string]any{"providers": statuses})
 }
 
 func handleRootRedirect(w http.ResponseWriter, r *http.Request) {

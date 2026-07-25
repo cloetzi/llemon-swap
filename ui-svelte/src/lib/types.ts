@@ -23,6 +23,34 @@ export interface Model {
   playgroundType?: PlaygroundModelType;
   aliases?: string[];
   capabilities?: ModelCapabilities;
+  provider?: string;
+  providerModel?: string;
+  lifecyclePool?: string;
+  residency?: "hard-pinned" | "preferred" | "transient" | "external";
+}
+
+export interface ProviderStatus {
+  name: string;
+  type: string;
+  capabilities: {
+    discovery: boolean;
+    load: boolean;
+    unload: boolean;
+    pin: boolean;
+    inference: boolean;
+  };
+  healthy: boolean;
+  version?: string;
+  lastError?: string;
+  residentModels?: Array<{
+    model_name: string;
+    status: string;
+    pinned: boolean;
+  }>;
+  desiredModels?: string[];
+  active?: Record<string, number>;
+  transitions?: Record<string, string>;
+  restoring?: Record<string, string[]>;
 }
 
 export interface Profile {
