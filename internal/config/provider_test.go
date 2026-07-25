@@ -52,6 +52,9 @@ models:
 	if got := cfg.Models["default"].UseModelName; got != "Qwen3-4B-GGUF" {
 		t.Fatalf("UseModelName = %q", got)
 	}
+	if got := cfg.Models["default"].CmdStop; got != "" {
+		t.Fatalf("CmdStop = %q", got)
+	}
 	if len(cfg.Hooks.OnStartup.Preload) != 1 || cfg.Hooks.OnStartup.Preload[0] != "default" {
 		t.Fatalf("preferred preloads = %v", cfg.Hooks.OnStartup.Preload)
 	}
@@ -89,6 +92,15 @@ providers: {p: {type: lemonade, baseURL: "http://localhost:13305"}}
 models: {m: {provider: p, providerModel: p, lifecyclePool: missing}}
 `,
 			want: `unknown pool`,
+		},
+		{
+			name: "process stop command",
+			yaml: `
+providers: {p: {type: lemonade, baseURL: "http://localhost:13305"}}
+lifecyclePools: {pool: {provider: p, capacity: 1}}
+models: {m: {provider: p, providerModel: p, lifecyclePool: pool, cmdStop: "stop"}}
+`,
+			want: `provider-backed models cannot define cmd or cmdStop`,
 		},
 		{
 			name: "duplicate mapping",
