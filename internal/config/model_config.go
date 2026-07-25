@@ -116,6 +116,13 @@ type ModelConfig struct {
 
 func (m *ModelConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	type rawModelConfig ModelConfig
+	var explicit struct {
+		CmdStop *string `yaml:"cmdStop"`
+	}
+	if err := unmarshal(&explicit); err != nil {
+		return err
+	}
+
 	defaults := rawModelConfig{
 		Cmd:              "",
 		CmdStop:          "",
@@ -149,6 +156,9 @@ func (m *ModelConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	if err := unmarshal(&defaults); err != nil {
 		return err
+	}
+	if defaults.Provider != "" && explicit.CmdStop == nil {
+		defaults.CmdStop = ""
 	}
 
 	*m = ModelConfig(defaults)
