@@ -14,6 +14,7 @@ import (
 
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/internal/provider"
 	"github.com/mostlygeek/llama-swap/internal/store"
 )
 
@@ -182,6 +183,10 @@ models:
 		_ = server.Shutdown(2 * time.Second)
 	})
 	waitFor(t, 2*time.Second, func() bool {
+		manager, ok := server.providers.Manager("local")
+		if !ok || manager.State("default") != provider.StateReady {
+			return false
+		}
 		fake.mu.Lock()
 		defer fake.mu.Unlock()
 		return fake.loaded["provider-default"] && fake.pinned["provider-default"]
