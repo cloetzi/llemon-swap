@@ -6,6 +6,10 @@ llemon-swap is a Lemonade-aware model lifecycle proxy and scheduler. It presents
 
 This project is a fork of [mostlygeek/llama-swap](https://github.com/mostlygeek/llama-swap). It retains llama-swap's process-managed models, routing, queueing, UI, metrics, configuration compatibility, license, and project history while adding lifecycle-managed providers. Existing llama-swap configurations remain valid.
 
+## Motivation
+
+llemon-swap started from a practical goal: switch seamlessly between models managed by Lemonade Server and [DwarfStar 4 (`ds4`)](https://github.com/antirez/ds4) through one client endpoint. Lemonade stays online and manages its resident model pool, while llemon-swap can start and stop `ds4-server` as a process-managed backend using llama-swap's existing lifecycle support.
+
 ## What llemon-swap adds
 
 - Lemonade Server discovery, health, load, unload, and public pin/unpin integration
@@ -15,9 +19,9 @@ This project is a fork of [mostlygeek/llama-swap](https://github.com/mostlygeek/
 - Coalesced cold loads, active-stream eviction protection, displaced-default restoration, and drift reconciliation
 - Provider state in the Web UI, `GET /api/providers`, `GET /ready`, structured logs, and Prometheus metrics
 
-## Lemonade quick start
+## Lemonade + DwarfStar 4 quick start
 
-Start Lemonade Server separately, then use a lifecycle pool. In this example, `main-chat` and `fast-chat` fill both slots. Work for `occasional-coder` temporarily displaces the lower-priority default; the default is restored and repinned after 30 seconds without transient work.
+Start Lemonade Server separately and install DwarfStar 4 under `/opt/ds4`, then use a lifecycle pool. In this example, `main-chat` and `fast-chat` fill both Lemonade slots. Work for `occasional-coder` temporarily displaces the lower-priority default; the default is restored and repinned after 30 seconds without transient work. Selecting `deepseek-v4-flash` starts `ds4-server` on demand and selecting a Lemonade alias routes back to the persistent Lemonade provider.
 
 ```yaml
 providers:
@@ -55,7 +59,16 @@ models:
     providerModel: Qwen3-Coder-GGUF
     lifecyclePool: primary
     residency: transient
+
+  deepseek-v4-flash:
+    cmd: /opt/ds4/ds4-server --chdir /opt/ds4 --ctx 100000 --kv-disk-dir /tmp/ds4-kv --kv-disk-space-mb 8192
+    proxy: http://127.0.0.1:8000
+    checkEndpoint: /v1/models
+    useModelName: deepseek-v4-flash
+    ttl: 300
 ```
+
+The Lemonade capacity and restoration policy apply only to Lemonade-backed models. DwarfStar 4 remains process-managed: llemon-swap starts it when requested and stops it after the configured `ttl`.
 
 See the [Lemonade lifecycle guide](docs/lemonade.md), [configuration reference](docs/configuration.md), and [complete example](docs/examples/lemonade/config.yaml).
 
@@ -141,7 +154,7 @@ Real time log streaming:
 
 ## Installation
 
-The llemon-swap lifecycle changes are currently built from this fork's source:
+Download a pre-built archive from the [llemon-swap releases](https://github.com/cloetzi/llemon-swap/releases), or build this fork from source:
 
 ```shell
 git clone https://github.com/cloetzi/llemon-swap.git
@@ -150,7 +163,7 @@ make clean all
 # binaries are written to build/llemon-swap-*
 ```
 
-The package-manager and container instructions below describe inherited upstream llama-swap distributions. Those artifacts do not include llemon-swap provider lifecycle support unless they are built from this fork.
+The package-manager and container instructions below describe inherited upstream llama-swap distributions. Those artifacts do not include llemon-swap provider lifecycle support.
 
 llama-swap can be installed in multiple ways:
 
@@ -248,12 +261,12 @@ C:\> winget upgrade llama-swap
 
 ### Pre-built Binaries
 
-Binaries are available on the [release](https://github.com/mostlygeek/llama-swap/releases) page for Linux, Mac, Windows and FreeBSD.
+llemon-swap binaries are published to this repository's [release page](https://github.com/cloetzi/llemon-swap/releases) for Linux, macOS, Windows, and FreeBSD.
 
 ### Building from source
 
 1. Building requires Go and Node.js (for UI).
-1. `git clone https://github.com/mostlygeek/llama-swap.git`
+1. `git clone https://github.com/cloetzi/llemon-swap.git`
 1. `make clean all`
 1. look in the `build/` subdirectory for the llama-swap binary
 
