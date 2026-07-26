@@ -2,18 +2,6 @@
 APP_NAME = llemon-swap
 BUILD_DIR = build
 
-# Prefer repository-local development tools when they have been bootstrapped.
-PATH := $(CURDIR)/.dev/bin:$(PATH)
-GOCACHE ?= $(CURDIR)/.dev/cache/go-build
-GOPATH ?= $(CURDIR)/.dev/go
-NPM_CONFIG_CACHE ?= $(CURDIR)/.dev/npm-cache
-XDG_CACHE_HOME ?= $(CURDIR)/.dev/cache
-export PATH
-export GOCACHE
-export GOPATH
-export NPM_CONFIG_CACHE
-export XDG_CACHE_HOME
-
 # Get closest tag or if that fails (no git repo or no tags) then devel
 GIT_VERSION := $(shell git describe --abbrev=6 --tags 2>/dev/null || echo devel)
 # Get the current Git hash
