@@ -117,7 +117,7 @@ models:
 			name: "missing secret",
 			yaml: `
 providers: {p: {type: lemonade, baseURL: "http://localhost:13305", apiKeyEnv: LEMON_MISSING_TEST_KEY}}
-models: {m: {cmd: "server"}}
+models: {m: {cmd: "server --port ${PORT}"}}
 `,
 			want: `is not set`,
 		},
