@@ -124,9 +124,6 @@ func resolveConfigMacros(yamlStr string) (map[string]any, configMacroConfig, err
 		}
 		delete(model, "macros")
 		stripRawCommandComments(model)
-		if proxy, found := model["proxy"]; !found || proxy == nil {
-			model["proxy"] = MODEL_CONFIG_DEFAULT_PROXY
-		}
 		models[modelID] = model
 	}
 
@@ -169,6 +166,11 @@ func resolveConfigMacros(yamlStr string) (map[string]any, configMacroConfig, err
 		model = resolved.(map[string]any)
 		if err := substituteSetParamsByIDKeys(model, macros); err != nil {
 			return nil, configMacroConfig{}, fmt.Errorf("model %s filters.setParamsByID: %w", modelID, err)
+		}
+
+		provider, _ := model["provider"].(string)
+		if proxy, found := model["proxy"]; provider == "" && (!found || proxy == nil) {
+			model["proxy"] = MODEL_CONFIG_DEFAULT_PROXY
 		}
 
 		cmd, _ := model["cmd"].(string)

@@ -74,8 +74,17 @@ func (p *ProviderModel) ResidentAdmission() { p.manager.ResidentAdmission() }
 
 func (p *ProviderModel) FairnessPromotion() { p.manager.FairnessPromotion() }
 
-func (p *ProviderModel) Run(_ time.Duration) error {
-	return p.manager.Load(context.Background(), p.id)
+func (p *ProviderModel) Run(timeout time.Duration) error {
+	return p.EnsureReady(context.Background(), timeout)
+}
+
+func (p *ProviderModel) EnsureReady(ctx context.Context, timeout time.Duration) error {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	return p.manager.Load(ctx, p.id)
 }
 
 func (p *ProviderModel) WaitReady(ctx context.Context) error {
