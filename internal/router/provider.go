@@ -49,30 +49,38 @@ func wrapLifecycleSwapper(cfg config.Config, registry *provider.Registry, fallba
 }
 
 func (s *lifecycleSwapper) EvictionFor(target string, running []string) []string {
+	policyEvictions := s.fallback.EvictionFor(target, running)
 	targetCfg, ok := s.cfg.Models[target]
 	if !ok || targetCfg.Provider == "" {
-		filtered := make([]string, 0, len(running))
-		for _, id := range running {
-			if s.cfg.Models[id].Provider == "" {
-				filtered = append(filtered, id)
-			}
-		}
-		return s.fallback.EvictionFor(target, filtered)
+		return policyEvictions
 	}
 	manager, ok := s.registry.ManagerForModel(target)
 	if !ok {
-		return nil
+		return policyEvictions
 	}
 	pool := s.cfg.LifecyclePools[targetCfg.LifecyclePool]
 	residents := manager.ResidentAliases(targetCfg.LifecyclePool)
 	for _, id := range residents {
 		if id == target {
-			return nil
+			return policyEvictions
 		}
 	}
+
+	evictSet := make(map[string]bool, len(policyEvictions))
+	evictions := append([]string(nil), policyEvictions...)
+	for _, id := range policyEvictions {
+		evictSet[id] = true
+	}
+
 	occupied := manager.OccupiedLLM()
+	residentLLMs := manager.ResidentLLMAliases(targetCfg.LifecyclePool)
+	for _, id := range residentLLMs {
+		if evictSet[id] {
+			occupied--
+		}
+	}
 	if occupied < pool.Capacity {
-		return nil
+		return evictions
 	}
 
 	type candidate struct {
@@ -81,7 +89,10 @@ func (s *lifecycleSwapper) EvictionFor(target string, running []string) []string
 		priority  int
 	}
 	var candidates []candidate
-	for _, id := range residents {
+	for _, id := range residentLLMs {
+		if evictSet[id] {
+			continue
+		}
 		modelCfg := s.cfg.Models[id]
 		if modelCfg.Residency == config.ResidencyHardPinned || modelCfg.Residency == config.ResidencyExternal {
 			continue
@@ -102,18 +113,17 @@ func (s *lifecycleSwapper) EvictionFor(target string, running []string) []string
 		// The provider's remaining slots are hard-pinned or externally owned.
 		// Let Load return the stable no_evictable_capacity error without first
 		// performing a destructive partial transition.
-		return nil
+		return evictions
 	}
-	evict := make([]string, 0, need)
 	for i := 0; i < need; i++ {
-		evict = append(evict, candidates[i].id)
+		evictions = append(evictions, candidates[i].id)
 	}
-	return evict
+	return evictions
 }
 
 func (s *lifecycleSwapper) OnSwapStart(target string, running []string) {
+	s.fallback.OnSwapStart(target, running)
 	if modelCfg, ok := s.cfg.Models[target]; !ok || modelCfg.Provider == "" {
-		s.fallback.OnSwapStart(target, running)
 		return
 	}
 	evict := s.EvictionFor(target, running)

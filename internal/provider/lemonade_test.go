@@ -164,6 +164,31 @@ func lemonadeModel(providerModel, residency string, priority int) config.ModelCo
 	}
 }
 
+func TestManager_ResidentLLMAliasesExcludesNonLLMModels(t *testing.T) {
+	manager := &Manager{
+		bindings: map[string]modelBinding{
+			"summary": {Config: lemonadeModel("summary-provider", config.ResidencyPreferred, 0)},
+			"whisper": {Config: lemonadeModel("whisper-provider", config.ResidencyPreferred, 1)},
+			"cold":    {Config: lemonadeModel("cold-provider", config.ResidencyTransient, 2)},
+		},
+		states: map[string]ModelState{
+			"summary": StateReady,
+			"whisper": StateReady,
+			"cold":    StateUnloaded,
+		},
+		health: Health{AllModelsLoaded: []ResidentModel{
+			{Name: "summary-provider", Type: "llm", Status: "ready"},
+			{Name: "whisper-provider", Type: "asr", Status: "ready"},
+			{Name: "cold-provider", Type: "llm", Status: "ready"},
+		}},
+	}
+
+	got := manager.ResidentLLMAliases("primary")
+	if len(got) != 1 || got[0] != "summary" {
+		t.Fatalf("ResidentLLMAliases() = %v, want [summary]", got)
+	}
+}
+
 func TestLemonade_DiscoveryAndAuthentication(t *testing.T) {
 	fake := newFakeLemonade(t, 2, "one", "two")
 	client := NewLemonade("local", providerTestConfig(fake, nil).Providers["local"])

@@ -190,6 +190,33 @@ func (m *Manager) ResidentAliases(pool string) []string {
 	return aliases
 }
 
+// ResidentLLMAliases reports configured LLM aliases currently occupying the
+// provider's LLM capacity. Non-LLM residents (for example speech and TTS
+// models) must not be selected to make room in an LLM lifecycle pool.
+func (m *Manager) ResidentLLMAliases(pool string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	residentLLMs := make(map[string]bool)
+	for _, resident := range m.health.AllModelsLoaded {
+		if resident.Type == "" || resident.Type == "llm" {
+			residentLLMs[resident.Name] = true
+		}
+	}
+
+	var aliases []string
+	for alias, binding := range m.bindings {
+		if binding.Config.LifecyclePool != pool || !residentLLMs[binding.Config.ProviderModel] {
+			continue
+		}
+		if m.states[alias] != StateUnloaded && m.states[alias] != StateFailed {
+			aliases = append(aliases, alias)
+		}
+	}
+	sort.Strings(aliases)
+	return aliases
+}
+
 // OccupiedLLM reports all observed Lemonade LLM residency, including models
 // not configured in llemon-swap. Destructive planning uses this fresh
 // cooperative-provider view so externally owned slots are never invisible.
