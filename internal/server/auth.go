@@ -58,18 +58,18 @@ func CreateRequestContextMiddleware(cfg config.Config) chain.Middleware {
 	}
 }
 
-// CreateCORSMiddleware returns middleware that answers OPTIONS preflight
-// requests with permissive CORS headers (see issues #81, #77, #42). Non-OPTIONS
-// requests pass through untouched.
+// CreateCORSMiddleware returns middleware that adds permissive browser-facing
+// CORS headers and answers OPTIONS preflight requests (see issues #81, #77,
+// #42).
 func CreateCORSMiddleware() chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 			if r.Method != http.MethodOptions {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			if headers := r.Header.Get("Access-Control-Request-Headers"); headers != "" {
 				w.Header().Set("Access-Control-Allow-Headers", sanitizeAccessControlRequestHeaderValues(headers))

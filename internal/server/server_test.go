@@ -277,6 +277,25 @@ func TestServer_CORSPreflight(t *testing.T) {
 	}
 }
 
+func TestServer_CORSActualResponse(t *testing.T) {
+	s := newTestServer(
+		newStubRouter([]string{"local-model"}, "local response"),
+		newStubRouter(nil, ""),
+	)
+
+	req := chatRequest("local-model")
+	req.Header.Set("Origin", "https://external.example")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin=%q want *", got)
+	}
+}
+
 func TestServer_Unload(t *testing.T) {
 	local := newStubRouter([]string{"m1"}, "")
 	s := newTestServer(local, newStubRouter(nil, ""))

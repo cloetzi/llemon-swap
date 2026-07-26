@@ -27,7 +27,11 @@ type fakeLemonadeServer struct {
 	loads    map[string]int
 	unloads  map[string]int
 	requests map[string]int
+	headers  map[string]http.Header
 	stream   map[string]chan struct{}
+
+	inferenceStatus int
+	inferenceBody   string
 }
 
 func newFakeLemonadeServer(t *testing.T, models ...string) *fakeLemonadeServer {
@@ -39,6 +43,7 @@ func newFakeLemonadeServer(t *testing.T, models ...string) *fakeLemonadeServer {
 		loads:    make(map[string]int),
 		unloads:  make(map[string]int),
 		requests: make(map[string]int),
+		headers:  make(map[string]http.Header),
 		stream:   make(map[string]chan struct{}),
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serveHTTP))
@@ -100,6 +105,11 @@ func (f *fakeLemonadeServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		writeJSON(w, map[string]string{"status": "success"})
 	case "/v1/chat/completions":
+		if r.Header.Get("Origin") != "" {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"error":"Origin not allowed"}`)
+			return
+		}
 		var request struct {
 			Model  string `json:"model"`
 			Stream bool   `json:"stream"`
@@ -107,8 +117,17 @@ func (f *fakeLemonadeServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&request)
 		f.mu.Lock()
 		f.requests[request.Model]++
+		f.headers[request.Model] = r.Header.Clone()
 		streamDone := f.stream[request.Model]
+		inferenceStatus := f.inferenceStatus
+		inferenceBody := f.inferenceBody
 		f.mu.Unlock()
+		if inferenceStatus != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(inferenceStatus)
+			fmt.Fprint(w, inferenceBody)
+			return
+		}
 		if request.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintf(w, "data: {\"model\":%q,\"part\":1}\n\n", request.Model)
@@ -136,11 +155,13 @@ func writeJSON(w http.ResponseWriter, value any) {
 
 func newLemonadeServerUnderTest(t *testing.T, fake *fakeLemonadeServer, ttl string) *Server {
 	t.Helper()
+	t.Setenv("LLEMON_SWAP_TEST_LEMONADE_API_KEY", "provider-secret")
 	cfg, err := config.LoadConfigFromReader(strings.NewReader(fmt.Sprintf(`
 providers:
   local:
     type: lemonade
     baseURL: %s
+    apiKeyEnv: LLEMON_SWAP_TEST_LEMONADE_API_KEY
     managementTimeout: 2s
     coldStartTimeout: 2s
     discoveryInterval: 1h
@@ -225,6 +246,79 @@ func TestServer_LemonadeProxyRewritesOnlyModel(t *testing.T) {
 	}
 	if body["model"] != "provider-default" {
 		t.Fatalf("provider response model = %v", body["model"])
+	}
+}
+
+func TestServer_LemonadePlaygroundOriginBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		stream     bool
+		status     int
+		body       string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "normal response",
+			wantStatus: http.StatusOK,
+			wantBody:   `"model":"provider-default"`,
+		},
+		{
+			name:       "error response",
+			status:     http.StatusUnprocessableEntity,
+			body:       `{"error":"invalid chat request"}`,
+			wantStatus: http.StatusUnprocessableEntity,
+			wantBody:   `{"error":"invalid chat request"}`,
+		},
+		{
+			name:       "streaming response",
+			stream:     true,
+			wantStatus: http.StatusOK,
+			wantBody:   "data: [DONE]\n\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeLemonadeServer(t, "provider-default")
+			fake.inferenceStatus = test.status
+			fake.inferenceBody = test.body
+			server := newLemonadeServerUnderTest(t, fake, time.Hour.String())
+			server.cfg.RequiredAPIKeys = []string{"client-secret"}
+			server.routes()
+
+			requestBody := fmt.Sprintf(`{"model":"default","messages":[{"role":"user","content":"hello"}],"stream":%t}`, test.stream)
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(requestBody))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Origin", "http://llemon-swap.test")
+			request.Header.Set("Authorization", "Bearer client-secret")
+			request.Header.Set("X-API-Key", "other-client-secret")
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d, body=%s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), test.wantBody) {
+				t.Errorf("body = %q, want substring %q", response.Body.String(), test.wantBody)
+			}
+			if got := response.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+			}
+
+			fake.mu.Lock()
+			upstreamHeaders := fake.headers["provider-default"].Clone()
+			fake.mu.Unlock()
+			if got := upstreamHeaders.Get("Origin"); got != "" {
+				t.Errorf("provider Origin = %q, want empty", got)
+			}
+			if got := upstreamHeaders.Get("Authorization"); got != "Bearer provider-secret" {
+				t.Errorf("provider Authorization = %q, want provider credential", got)
+			}
+			if got := upstreamHeaders.Get("X-API-Key"); got != "" {
+				t.Errorf("provider X-API-Key = %q, want client credential stripped", got)
+			}
+		})
 	}
 }
 

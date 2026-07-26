@@ -156,6 +156,7 @@ Lifecycle logs use `provider`, `model`, `transition`, and duration fields. Promp
 - Use separate inference and management credentials when the deployment or reverse proxy supports them.
 - Protect llemon-swap with `apiKeys` and firewall Lemonade's management endpoints from clients.
 - Client `Authorization` and `X-API-Key` headers are stripped before inference proxying; the provider credential is injected explicitly.
+- Browser origin and CORS policy terminate at llemon-swap. The client `Origin` is not forwarded on the internal Lemonade inference hop.
 
 ## Troubleshooting
 

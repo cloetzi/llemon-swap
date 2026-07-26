@@ -37,6 +37,10 @@ func NewProviderModel(id string, manager *provider.Manager, logger *logmon.Monit
 		Rewrite: func(proxyReq *httputil.ProxyRequest) {
 			proxyReq.SetURL(target)
 			proxyReq.SetXForwarded()
+			// The browser origin terminates at llemon-swap. Forwarding it would
+			// make Lemonade apply its browser-origin policy to this trusted
+			// server-to-server hop.
+			proxyReq.Out.Header.Del("Origin")
 			// Client credentials authorize llemon-swap, not the provider.
 			proxyReq.Out.Header.Del("Authorization")
 			proxyReq.Out.Header.Del("X-API-Key")
