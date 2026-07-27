@@ -2,6 +2,8 @@
 
 # llemon-swap
 
+> ‼️ While llama-swap is a serious project, all changes added in this fork were vibe-coded. Use with care.
+
 llemon-swap is a Lemonade-aware model lifecycle proxy and scheduler. It presents one OpenAI- and Anthropic-compatible endpoint, keeps preferred models resident, temporarily makes room for on-demand models, and restores displaced defaults after their work finishes.
 
 This project is a fork of [mostlygeek/llama-swap](https://github.com/mostlygeek/llama-swap). It retains llama-swap's process-managed models, routing, queueing, UI, metrics, configuration compatibility, license, and project history while adding lifecycle-managed providers. Existing llama-swap configurations remain valid.
