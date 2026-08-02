@@ -15,17 +15,19 @@ import (
 )
 
 type fakeLemonade struct {
-	mu       sync.Mutex
-	server   *httptest.Server
-	models   []string
-	loaded   map[string]bool
-	pinned   map[string]bool
-	loads    map[string]int
-	unloads  map[string]int
-	capacity int
-	delay    time.Duration
-	failLoad map[string]int
-	lastAuth string
+	mu              sync.Mutex
+	server          *httptest.Server
+	models          []string
+	loaded          map[string]bool
+	pinned          map[string]bool
+	loads           map[string]int
+	unloads         map[string]int
+	capacity        int
+	globalUnloads   int
+	perModelUnloads int
+	delay           time.Duration
+	failLoad        map[string]int
+	lastAuth        string
 }
 
 func newFakeLemonade(t *testing.T, capacity int, models ...string) *fakeLemonade {
@@ -106,9 +108,20 @@ func (f *fakeLemonade) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			Model string `json:"model_name"`
 		}
 		json.NewDecoder(r.Body).Decode(&request)
-		delete(f.loaded, request.Model)
-		delete(f.pinned, request.Model)
-		f.unloads[request.Model]++
+		if request.Model == "" {
+			// global unload: evict every loaded model in one call
+			f.globalUnloads++
+			for model := range f.loaded {
+				delete(f.loaded, model)
+				delete(f.pinned, model)
+				f.unloads[model]++
+			}
+		} else {
+			f.perModelUnloads++
+			delete(f.loaded, request.Model)
+			delete(f.pinned, request.Model)
+			f.unloads[request.Model]++
+		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 	default:
 		http.NotFound(w, r)
@@ -300,6 +313,49 @@ func TestManager_ExternalResidencyIsNotUnloaded(t *testing.T) {
 	manager, _ := registry.ManagerForModel("external")
 	if err := manager.Unload(context.Background(), "external"); err == nil {
 		t.Fatal("expected externally owned unload to fail")
+	}
+}
+
+func TestManager_UnloadAll(t *testing.T) {
+	fake := newFakeLemonade(t, 4, "default", "transient", "external")
+	fake.loaded["default"] = true
+	fake.pinned["default"] = true
+	fake.loaded["transient"] = true
+	fake.loaded["external"] = true // externally owned, must also be cleared by the global unload
+	cfg := providerTestConfig(fake, map[string]config.ModelConfig{
+		"default":   lemonadeModel("default", config.ResidencyPreferred, 0),
+		"transient": lemonadeModel("transient", config.ResidencyTransient, 10),
+		"external":  lemonadeModel("external", config.ResidencyExternal, 0),
+	})
+	registry, err := NewRegistry(context.Background(), cfg, logmon.New())
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	t.Cleanup(registry.Close)
+	manager, _ := registry.ManagerForModel("default")
+
+	if err := manager.UnloadAll(context.Background()); err != nil {
+		t.Fatalf("UnloadAll: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.globalUnloads != 1 || fake.perModelUnloads != 0 {
+		t.Fatalf("UnloadAll should use one global unload (global=%d perModel=%d)", fake.globalUnloads, fake.perModelUnloads)
+	}
+	if fake.loaded["default"] || fake.loaded["transient"] || fake.loaded["external"] {
+		t.Fatalf("UnloadAll should clear every loaded model, got %v", fake.loaded)
+	}
+	if fake.unloads["default"] != 1 || fake.unloads["transient"] != 1 || fake.unloads["external"] != 1 {
+		t.Fatalf("global unload should evict each model once, got %v", fake.unloads)
+	}
+	for _, alias := range []string{"default", "transient", "external"} {
+		if manager.State(alias) != StateUnloaded {
+			t.Errorf("State(%s)=%q, want unloaded", alias, manager.State(alias))
+		}
+		if manager.owned[alias] {
+			t.Errorf("owned[%s]=true, want false after UnloadAll", alias)
+		}
 	}
 }
 

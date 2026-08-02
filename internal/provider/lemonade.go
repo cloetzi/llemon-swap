@@ -83,6 +83,14 @@ func (l *Lemonade) Unload(ctx context.Context, model string) error {
 	return l.do(ctx, http.MethodPost, "/api/v1/unload", map[string]any{"model_name": model}, nil)
 }
 
+// UnloadAll evicts every model the provider currently holds in a single global
+// operation. Sending an empty model_name makes Lemonade unload all loaded
+// servers, which is what a swap that requires a completely empty provider needs
+// (for example a process-managed target demanding exclusive GPU capacity).
+func (l *Lemonade) UnloadAll(ctx context.Context) error {
+	return l.do(ctx, http.MethodPost, "/api/v1/unload", map[string]any{"model_name": ""}, nil)
+}
+
 // Pin intentionally uses the public load endpoint. Current Lemonade releases
 // treat an explicit pinned value on an already-loaded model as a dynamic pin
 // update, avoiding the compatibility risk of /internal/pin.

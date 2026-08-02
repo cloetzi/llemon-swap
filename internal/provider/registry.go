@@ -190,6 +190,23 @@ func (m *Manager) ResidentAliases(pool string) []string {
 	return aliases
 }
 
+// ResidentAliasesAll reports every configured alias currently resident on the
+// provider, across all pools and model types. It is used to detect when a swap
+// evicts every model a provider maintains, enabling a single global unload
+// instead of per-model stops.
+func (m *Manager) ResidentAliasesAll() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var aliases []string
+	for alias := range m.bindings {
+		if m.states[alias] != StateUnloaded && m.states[alias] != StateFailed {
+			aliases = append(aliases, alias)
+		}
+	}
+	sort.Strings(aliases)
+	return aliases
+}
+
 // ResidentLLMAliases reports configured LLM aliases currently occupying the
 // provider's LLM capacity. Non-LLM residents (for example speech and TTS
 // models) must not be selected to make room in an LLM lifecycle pool.
@@ -394,6 +411,48 @@ func (m *Manager) Unload(ctx context.Context, alias string) error {
 	delete(m.transitions, alias)
 	m.mu.Unlock()
 	m.log.Infof("provider=%s model=%s transition=unload duration=%s", m.name, alias, time.Since(started).Round(time.Millisecond))
+	return nil
+}
+
+// UnloadAll evicts every model the provider currently holds in a single global
+// operation. It is used when a swap requires the provider to be completely
+// empty (for example a process-managed target that demands exclusive GPU
+// capacity), so the per-model external-ownership guard is intentionally
+// skipped — the global endpoint clears externally owned models too.
+//
+// The caller must have already decided (via ResidentAliasesAll) that every
+// configured model is being evicted; any in-flight inference on an
+// externally-owned model will be interrupted by the global eviction.
+func (m *Manager) UnloadAll(ctx context.Context) error {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
+	if err := m.reconcileLocked(ctx, false); err != nil {
+		return err
+	}
+	started := time.Now()
+	if err := m.client.UnloadAll(ctx); err != nil {
+		m.mu.Lock()
+		m.lastError = err.Error()
+		m.mu.Unlock()
+		return err
+	}
+	if err := m.reconcileLocked(ctx, false); err != nil {
+		m.mu.Lock()
+		m.lastError = err.Error()
+		m.mu.Unlock()
+		return err
+	}
+	m.mu.Lock()
+	for alias := range m.bindings {
+		m.owned[alias] = false
+		m.states[alias] = StateUnloaded
+		delete(m.transitions, alias)
+		delete(m.displaced, alias)
+		m.unloadDurations[alias] = time.Since(started).Seconds()
+	}
+	m.mu.Unlock()
+	m.log.Infof("provider=%s transition=unload_all duration=%s", m.name, time.Since(started).Round(time.Millisecond))
 	return nil
 }
 
