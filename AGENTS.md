@@ -1,3 +1,9 @@
+## Project Description
+
+This is a fork of llama-swap that adds first-party support for using lemonade server (https://lemonade-server.ai/docs/) as an additional backend.
+
+llama-swap is a light weight, transparent proxy server that provides automatic model swapping to llama.cpp's server.
+
 ## Architecture
 
 Only use these technologies:
