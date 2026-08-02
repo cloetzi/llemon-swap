@@ -87,10 +87,16 @@ func TestLifecycleSwapper_ProviderTargetCombinesMatrixAndCapacity(t *testing.T) 
 	}
 	t.Cleanup(registry.Close)
 
-	matrix := &matrixSwapper{solver: newMatrixSolver([]config.ExpandedSet{
-		{SetName: "standard", Models: []string{"summary", "qwen", "gemma"}},
-		{SetName: "standalone", Models: []string{"summary", "large"}},
-	}, nil), logger: logmon.New()}
+	matrixCfg := &config.MatrixConfig{
+		Sets: config.OrderedSets{
+			{Name: "standard", DSL: "summary & qwen & gemma"},
+			{Name: "standalone", DSL: "summary & large"},
+		},
+	}
+	if err := config.ValidateMatrix(matrixCfg, models); err != nil {
+		t.Fatalf("ValidateMatrix: %v", err)
+	}
+	matrix := &matrixSwapper{solver: newMatrixSolver(matrixCfg.Program(), matrixCfg.ResolvedEvictCosts()), logger: logmon.New()}
 	swapper := wrapLifecycleSwapper(cfg, registry, matrix, logmon.New())
 
 	got := swapper.EvictionFor("large", []string{"summary", "qwen", "gemma"})
