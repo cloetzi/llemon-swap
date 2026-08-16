@@ -62,6 +62,8 @@ func NewProviderModel(id string, manager *provider.Manager, logger *logmon.Monit
 
 func (p *ProviderModel) Logger() *logmon.Monitor { return p.logger }
 
+func (p *ProviderModel) Manager() *provider.Manager { return p.manager }
+
 func (p *ProviderModel) BeginSwap(victims []string) {
 	p.manager.BeginSwap(p.id, victims)
 }

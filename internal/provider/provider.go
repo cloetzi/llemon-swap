@@ -62,6 +62,7 @@ type Lifecycle interface {
 	Discover(context.Context) ([]DiscoveredModel, error)
 	Load(context.Context, string, *bool) error
 	Unload(context.Context, string) error
+	UnloadAll(context.Context) error
 	Pin(context.Context, string, bool) error
 	BaseURL() string
 	InferenceAPIKey() string

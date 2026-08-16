@@ -291,15 +291,76 @@ func (b *baseRouter) trackedServe(modelID string, p process.Process) http.Handle
 func (b *baseRouter) doSwap(modelID string, toStop []string) {
 	timeout := b.healthCheckTimeout()
 
+	// Detect provider managers this swap empties completely. When every
+	// configured model a manager currently holds is being evicted, a single
+	// global unload replaces the per-model stops: Lemonade would otherwise
+	// serialize each unload one at a time, and per-model stops also skip
+	// externally owned models that a completely-empty provider must release.
+	// The global endpoint clears everything in one round trip.
+	type managerProcess interface {
+		Manager() *provider.Manager
+	}
+	victims := make(map[string]bool, len(toStop))
+	for _, id := range toStop {
+		victims[id] = true
+	}
+	// A provider manager is only emptied when the swap target is not itself
+	// provider-managed (for example a process-managed model demanding a
+	// completely empty provider). If the target is provider-managed it stays
+	// resident after the swap, so the provider is never empty and per-model
+	// unloads remain correct — a global unload would tear down a model the
+	// swap is about to keep resident.
+	empty := make(map[*provider.Manager]bool)
+	if _, targetIsProvider := b.processes[modelID].(managerProcess); !targetIsProvider {
+		for _, id := range toStop {
+			p, ok := b.processes[id].(managerProcess)
+			if !ok {
+				continue
+			}
+			m := p.Manager()
+			if empty[m] {
+				continue
+			}
+			allEvicted := true
+			for _, alias := range m.ResidentAliasesAll() {
+				if !victims[alias] {
+					allEvicted = false
+					break
+				}
+			}
+			if allEvicted {
+				empty[m] = true
+			}
+		}
+	}
+
 	var wg sync.WaitGroup
-	for _, mID := range toStop {
+	for _, id := range toStop {
+		if p, ok := b.processes[id].(managerProcess); ok && empty[p.Manager()] {
+			continue // handled by the global unload below
+		}
 		wg.Add(1)
 		go func(p process.Process, id string) {
 			defer wg.Done()
 			if err := p.Stop(timeout); err != nil {
 				b.logger.Warnf("%s: stopping %s failed: %v", b.name, id, err)
 			}
-		}(b.processes[mID], mID)
+		}(b.processes[id], id)
+	}
+	for m := range empty {
+		wg.Add(1)
+		go func(m *provider.Manager) {
+			defer wg.Done()
+			ctx := context.Background()
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			if err := m.UnloadAll(ctx); err != nil {
+				b.logger.Warnf("%s: global unload of provider %s failed: %v", b.name, m.Name(), err)
+			}
+		}(m)
 	}
 	wg.Wait()
 
